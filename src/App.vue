@@ -76,6 +76,8 @@ import { ActivityTracker } from './services/ActivityTracker'
 import { AIService } from './services/AIService'
 import AppUsageChart from './components/AppUsageChart.vue'
 
+console.log('App.vue script started')
+
 const activityTracker = new ActivityTracker()
 const aiService = new AIService()
 
@@ -101,39 +103,65 @@ const formatTime = (seconds) => {
 }
 
 const toggleTracking = async () => {
-  if (isTracking.value) {
-    await activityTracker.stopTracking()
-  } else {
-    await activityTracker.startTracking()
+  try {
+    if (isTracking.value) {
+      await activityTracker.stopTracking()
+    } else {
+      await activityTracker.startTracking()
+    }
+    isTracking.value = !isTracking.value
+    await updateStats()
+  } catch (error) {
+    console.error('Error in toggleTracking:', error)
   }
-  isTracking.value = !isTracking.value
-  updateStats()
 }
 
 const updateStats = async () => {
-  const stats = await activityTracker.getTodayStats()
-  todayStats.value = stats
+  try {
+    console.log('Updating stats...')
+    const stats = await activityTracker.getTodayStats()
+    todayStats.value = stats
+    console.log('Today stats:', stats)
 
-  const apps = await activityTracker.getTopApps(10)
-  topApps.value = apps
+    const apps = await activityTracker.getTopApps(10)
+    topApps.value = apps
+    console.log('Top apps:', apps)
 
-  const chart = await activityTracker.getChartData()
-  chartData.value = chart
+    const chart = await activityTracker.getChartData()
+    chartData.value = chart
+    console.log('Chart data:', chart)
+  } catch (error) {
+    console.error('Error in updateStats:', error)
+  }
 }
 
 const generateReport = async () => {
-  const data = await activityTracker.getTodayData()
-  const report = await aiService.generateReport(data)
-  aiReport.value = report
+  try {
+    const data = await activityTracker.getTodayData()
+    const report = await aiService.generateReport(data)
+    aiReport.value = report
+  } catch (error) {
+    console.error('Error in generateReport:', error)
+  }
 }
 
 const copyReport = () => {
-  navigator.clipboard.writeText(aiReport.value)
-  utools?.showNotification('报告已复制到剪贴板')
+  try {
+    navigator.clipboard.writeText(aiReport.value)
+    utools?.showNotification('报告已复制到剪贴板')
+  } catch (error) {
+    console.error('Error in copyReport:', error)
+  }
 }
 
-onMounted(() => {
-  updateStats()
+onMounted(async () => {
+  try {
+    console.log('onMounted called')
+    await updateStats()
+    console.log('onMounted completed')
+  } catch (error) {
+    console.error('Error in onMounted:', error)
+  }
 })
 </script>
 

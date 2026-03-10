@@ -2,7 +2,7 @@
   "name": "FocusFlow 活动追踪",
   "description": "智能追踪电脑使用活动，AI生成使用总结报告",
   "icon": "assets/icon.svg",
-  "logo": "logo.png",
+  "logo": "assets/logo.png",
   "main": "index.html",
   "version": "1.0.0",
   "author": "zhaoqi",
