@@ -6,20 +6,25 @@ export class ActivityTracker {
     this.currentApp = null
     this.startTime = null
     this.data = this.loadData()
+    this.userActions = []
+    this.windowHistory = []
+    this.lastWindow = null
   }
 
   loadData() {
     try {
       const stored = localStorage.getItem('focusflow-data')
-      return stored ? JSON.parse(stored) : { sessions: [], daily: {} }
+      return stored ? JSON.parse(stored) : { sessions: [], daily: {}, userActions: [] }
     } catch (error) {
       console.error('Failed to load data:', error)
-      return { sessions: [], daily: {} }
+      return { sessions: [], daily: {}, userActions: [] }
     }
   }
 
   saveData() {
     try {
+      // 保存用户操作记录
+      this.data.userActions = this.userActions
       localStorage.setItem('focusflow-data', JSON.stringify(this.data))
     } catch (error) {
       console.error('Failed to save data:', error)
@@ -57,20 +62,30 @@ export class ActivityTracker {
   }
 
   startAppListener() {
-    // 模拟应用切换监听（实际项目中需要使用 uTools API 或系统 API）
+    // 监听应用切换
     this.appListenerInterval = setInterval(async () => {
       if (!this.isTracking) return
 
-      const newApp = await this.getCurrentApp()
-      if (newApp !== this.currentApp) {
-        // 应用切换
-        if (this.currentApp && this.startTime) {
-          await this.endSession(this.currentApp, this.startTime, Date.now())
-        }
+      try {
+        const newApp = await this.getCurrentApp()
+        if (newApp !== this.currentApp) {
+          // 应用切换
+          if (this.currentApp && this.startTime) {
+            await this.endSession(this.currentApp, this.startTime, Date.now())
+          }
 
-        this.currentApp = newApp
-        this.startTime = Date.now()
-        console.log('App switched to:', newApp)
+          // 记录应用切换事件
+          this.recordUserAction('app_switch', {
+            from: this.currentApp,
+            to: newApp
+          })
+
+          this.currentApp = newApp
+          this.startTime = Date.now()
+          console.log('App switched to:', newApp)
+        }
+      } catch (error) {
+        console.error('Error in app listener:', error)
       }
     }, 1000) // 每秒检查一次
   }
@@ -83,17 +98,35 @@ export class ActivityTracker {
   }
 
   async getCurrentApp() {
-    // 模拟获取当前应用（实际项目中需要使用 uTools API）
     try {
-      // 这里应该使用 uTools API 获取当前活动应用
-      // const currentApp = utools.getCurrentWindow()
-
-      // 模拟数据
-      const apps = ['Chrome', 'VS Code', '微信', 'Finder', '终端']
-      return apps[Math.floor(Math.random() * apps.length)]
+      if (typeof utools !== 'undefined' && typeof utools.getCurrentWindow === 'function') {
+        const windowInfo = utools.getCurrentWindow()
+        return windowInfo.process.name || '未知应用'
+      } else {
+        // 模拟数据
+        const apps = ['Chrome', 'VS Code', '微信', 'Finder', '终端']
+        return apps[Math.floor(Math.random() * apps.length)]
+      }
     } catch (error) {
       console.error('Failed to get current app:', error)
       return '未知应用'
+    }
+  }
+
+  async getCurrentWindow() {
+    try {
+      if (typeof utools !== 'undefined' && typeof utools.getCurrentWindow === 'function') {
+        return utools.getCurrentWindow()
+      } else {
+        // 模拟数据
+        return {
+          title: document.title,
+          process: { name: 'browser', path: window.location.href }
+        }
+      }
+    } catch (error) {
+      console.error('Failed to get current window:', error)
+      return null
     }
   }
 
@@ -138,6 +171,122 @@ export class ActivityTracker {
     this.saveData()
   }
 
+  // 记录用户操作
+  recordUserAction(actionType, details) {
+    const action = {
+      type: actionType,
+      details: details,
+      timestamp: Date.now(),
+      date: dayjs().format('YYYY-MM-DD'),
+      time: dayjs().format('HH:mm:ss')
+    }
+    this.userActions.push(action)
+    
+    // 限制记录数量，避免内存占用过大
+    if (this.userActions.length > 1000) {
+      this.userActions.shift()
+    }
+    
+    console.log('User action recorded:', action)
+  }
+
+  // 获取用户操作记录
+  getUserActions(timeRange) {
+    if (!timeRange) {
+      return this.userActions
+    }
+    const { startTime, endTime } = timeRange
+    return this.userActions.filter(action => 
+      action.timestamp >= startTime && action.timestamp <= endTime
+    )
+  }
+
+  // 生成用户活动报告
+  generateActivityReport(timeRange) {
+    const actions = this.getUserActions(timeRange)
+    const appUsage = this.getAppUsage(actions)
+    
+    return {
+      totalActions: actions.length,
+      appSwitches: actions.filter(a => a.type === 'app_switch').length,
+      mostActiveApps: this.getMostActiveApps(appUsage),
+      timeDistribution: this.getTimeDistribution(actions),
+      focusScore: this.calculateFocusScore(actions)
+    }
+  }
+
+  // 获取应用使用情况
+  getAppUsage(actions) {
+    const appUsage = {}
+    
+    // 分析应用切换事件
+    for (let i = 0; i < actions.length; i++) {
+      const action = actions[i]
+      if (action.type === 'app_switch' && action.details.to) {
+        const appName = action.details.to
+        if (!appUsage[appName]) {
+          appUsage[appName] = {
+            startTime: action.timestamp,
+            endTime: action.timestamp,
+            totalTime: 0
+          }
+        } else {
+          // 更新上一个应用的结束时间和使用时长
+          appUsage[appName].endTime = action.timestamp
+          appUsage[appName].totalTime += action.timestamp - appUsage[appName].startTime
+          // 开始新应用的计时
+          appUsage[action.details.to] = {
+            startTime: action.timestamp,
+            endTime: action.timestamp,
+            totalTime: 0
+          }
+        }
+      }
+    }
+    
+    return appUsage
+  }
+
+  // 获取最活跃的应用
+  getMostActiveApps(appUsage) {
+    return Object.entries(appUsage)
+      .map(([name, data]) => ({
+        name,
+        usageTime: Math.floor(data.totalTime / 1000 / 60) // 转换为分钟
+      }))
+      .sort((a, b) => b.usageTime - a.usageTime)
+      .slice(0, 5)
+  }
+
+  // 获取时间分布
+  getTimeDistribution(actions) {
+    const hours = {}
+    
+    actions.forEach(action => {
+      const hour = new Date(action.timestamp).getHours()
+      if (!hours[hour]) {
+        hours[hour] = 0
+      }
+      hours[hour]++
+    })
+    
+    return hours
+  }
+
+  // 计算专注度分数
+  calculateFocusScore(actions) {
+    if (!actions.length) return 0
+
+    // 分析应用切换频率
+    const appSwitches = actions.filter(a => a.type === 'app_switch').length
+    const totalTime = actions[actions.length - 1].timestamp - actions[0].timestamp
+    const switchRate = appSwitches / (totalTime / 1000 / 60) // 每分钟切换次数
+
+    // 切换频率越低，专注度越高
+    let focusScore = Math.max(0, 100 - (switchRate * 10))
+    return Math.floor(focusScore)
+  }
+
   async getTodayStats() {
     const today = dayjs().format('YYYY-MM-DD')
     const dayData = this.data.daily[today]
@@ -152,7 +301,7 @@ export class ActivityTracker {
     }
 
     const appSwitches = dayData.sessions.length
-    const focusScore = this.calculateFocusScore(dayData)
+    const focusScore = this.calculateFocusScore(this.getUserActions())
 
     return {
       totalTime: Math.floor(dayData.totalTime / 1000), // 转换为秒
@@ -160,28 +309,6 @@ export class ActivityTracker {
       appSwitches: appSwitches,
       focusScore: focusScore
     }
-  }
-
-  calculateFocusScore(dayData) {
-    if (!dayData.sessions.length) return 0
-
-    // 计算专注度分数
-    const sessions = dayData.sessions
-    let totalFocusTime = 0
-    let totalTime = 0
-
-    for (let i = 0; i < sessions.length; i++) {
-      const session = sessions[i]
-      const duration = session.duration
-      totalTime += duration
-
-      // 认为超过5分钟的会话是专注的
-      if (duration > 5 * 60 * 1000) {
-        totalFocusTime += duration
-      }
-    }
-
-    return totalTime > 0 ? Math.floor((totalFocusTime / totalTime) * 100) : 0
   }
 
   async getTopApps(limit = 10) {
@@ -257,7 +384,7 @@ export class ActivityTracker {
         sessions: data.sessions
       })),
       sessions: dayData.sessions.length,
-      focusScore: this.calculateFocusScore(dayData)
+      focusScore: this.calculateFocusScore(this.getUserActions())
     }
   }
 }

@@ -27,32 +27,34 @@
       </div>
 
       <div class="settings-section">
-        <h3>追踪设置</h3>
-        <div class="form-group">
-          <label class="checkbox-label">
-            <input type="checkbox" v-model="settings.autoStart" />
-            自动开始追踪
-          </label>
-        </div>
-        <div class="form-group">
-          <label class="checkbox-label">
-            <input type="checkbox" v-model="settings.notifications" />
-            启用通知提醒
-          </label>
-        </div>
-        <div class="form-group">
-          <label for="check-interval">检查间隔（秒）</label>
-          <input
-            id="check-interval"
-            v-model.number="settings.checkInterval"
-            type="number"
-            min="1"
-            max="60"
-            class="form-input"
-          />
-        </div>
-        <button class="btn btn-primary" @click="saveSettings">保存设置</button>
+      <h3>追踪设置</h3>
+      <div class="form-group">
+        <label class="checkbox-label">
+          <input type="checkbox" v-model="settings.autoStart" />
+          自动开始追踪
+        </label>
       </div>
+      <div class="form-group">
+        <label class="checkbox-label">
+          <input type="checkbox" v-model="settings.notifications" />
+          启用通知提醒
+        </label>
+      </div>
+      <div class="form-group">
+        <label for="check-interval">检查间隔（秒）</label>
+        <input
+          id="check-interval"
+          v-model.number="settings.checkInterval"
+          type="number"
+          min="1"
+          max="60"
+          class="form-input"
+        />
+      </div>
+      <button class="btn btn-primary" @click="saveSettings">保存设置</button>
+    </div>
+
+
 
       <div class="settings-section">
         <h3>数据管理</h3>

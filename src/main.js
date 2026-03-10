@@ -33,10 +33,16 @@ if (typeof utools !== 'undefined') {
     console.log('Plugin exited')
   })
 
-  // 插件隐藏时
-  utools.onPluginHide(() => {
-    console.log('Plugin hidden')
-  })
+  // 插件隐藏时 - 注意：utools.onPluginHide 方法可能不存在，使用try-catch包裹
+  try {
+    if (typeof utools.onPluginHide === 'function') {
+      utools.onPluginHide(() => {
+        console.log('Plugin hidden')
+      })
+    }
+  } catch (error) {
+    console.log('utools.onPluginHide not available:', error)
+  }
 
   // 插件显示时
   utools.onPluginReady(() => {

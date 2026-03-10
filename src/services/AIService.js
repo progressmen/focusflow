@@ -179,4 +179,71 @@ export class AIService {
 
     return prompt
   }
+
+  async analyzeUserActivity(activityData) {
+    if (!this.client) {
+      return '请先设置 Claude API Key 以使用 AI 分析功能。'
+    }
+
+    if (!activityData || activityData.totalActions === 0) {
+      return '暂无用户活动数据可供分析。'
+    }
+
+    try {
+      const prompt = this.buildActivityAnalysisPrompt(activityData)
+
+      const response = await this.client.messages.create({
+        model: 'claude-3-sonnet-20240229',
+        max_tokens: 1000,
+        temperature: 0.7,
+        system: '你是一个专业的用户行为分析专家，擅长通过用户活动数据分析用户的电脑使用习惯。请用中文回复，语言简洁专业。',
+        messages: [
+          {
+            role: 'user',
+            content: prompt
+          }
+        ]
+      })
+
+      return response.content[0].text
+    } catch (error) {
+      console.error('Activity analysis failed:', error)
+      return `AI 活动分析失败: ${error.message}`
+    }
+  }
+
+  buildActivityAnalysisPrompt(activityData) {
+    let prompt = `请分析以下用户活动数据，并生成一份详细的使用习惯分析报告：\n\n`
+    prompt += `📊 活动统计：\n`
+    prompt += `总活动次数: ${activityData.totalActions}\n`
+    prompt += `应用切换次数: ${activityData.appSwitches}\n`
+    prompt += `专注度评分: ${activityData.focusScore}%\n\n`
+
+    if (activityData.mostActiveApps && activityData.mostActiveApps.length > 0) {
+      prompt += `🔥 最活跃应用：\n`
+      activityData.mostActiveApps.forEach((app, index) => {
+        prompt += `${index + 1}. ${app.name}: ${app.usageTime}分钟\n`
+      })
+      prompt += `\n`
+    }
+
+    if (activityData.timeDistribution) {
+      prompt += `⏰ 时间分布：\n`
+      const hours = Object.entries(activityData.timeDistribution)
+        .sort((a, b) => parseInt(a[0]) - parseInt(b[0]))
+      hours.forEach(([hour, count]) => {
+        prompt += `${hour}:00 - ${hour}:59: ${count}次活动\n`
+      })
+      prompt += `\n`
+    }
+
+    prompt += `请提供以下分析：\n`
+    prompt += `1. 用户的工作/学习模式分析\n`
+    prompt += `2. 时间使用效率评估\n`
+    prompt += `3. 可能的干扰因素\n`
+    prompt += `4. 改进建议\n`
+    prompt += `\n请用中文回复，语言简洁专业，重点突出用户的活动模式和时间使用情况。`
+
+    return prompt
+  }
 }

@@ -9,6 +9,9 @@
         <button class="btn btn-primary" @click="generateReport">
           AI 生成报告
         </button>
+        <button class="btn btn-primary" @click="generateActivityReport">
+          活动分析报告
+        </button>
       </div>
     </header>
 
@@ -44,7 +47,7 @@
         <div class="apps-list">
           <div v-for="app in topApps" :key="app.name" class="app-item">
             <div class="app-info">
-              <img :src="app.icon" :alt="app.name" class="app-icon">
+              <span class="app-icon">{{ app.icon }}</span>
               <span class="app-name">{{ app.name }}</span>
             </div>
             <div class="app-usage">
@@ -64,6 +67,16 @@
             {{ aiReport }}
           </div>
           <button class="btn btn-secondary" @click="copyReport">复制报告</button>
+        </div>
+      </div>
+
+      <div v-if="activityReport" class="ai-report-section">
+        <h2>活动分析报告</h2>
+        <div class="ai-report">
+          <div class="report-content">
+            {{ activityReport }}
+          </div>
+          <button class="btn btn-secondary" @click="copyActivityReport">复制报告</button>
         </div>
       </div>
     </main>
@@ -92,6 +105,7 @@ const todayStats = ref({
 const topApps = ref([])
 const chartData = ref([])
 const aiReport = ref('')
+const activityReport = ref('')
 
 const formatTime = (seconds) => {
   const hours = Math.floor(seconds / 3600)
@@ -148,9 +162,47 @@ const generateReport = async () => {
 const copyReport = () => {
   try {
     navigator.clipboard.writeText(aiReport.value)
-    utools?.showNotification('报告已复制到剪贴板')
+    // 检查utools.showNotification方法是否存在
+    if (typeof utools !== 'undefined' && typeof utools.showNotification === 'function') {
+      utools.showNotification('报告已复制到剪贴板')
+    } else {
+      console.log('报告已复制到剪贴板')
+    }
   } catch (error) {
     console.error('Error in copyReport:', error)
+  }
+}
+
+const generateActivityReport = async () => {
+  try {
+    const today = new Date()
+    const startTime = new Date(today.getFullYear(), today.getMonth(), today.getDate()).getTime()
+    const endTime = new Date(today.getFullYear(), today.getMonth(), today.getDate(), 23, 59, 59).getTime()
+    
+    const activityData = activityTracker.generateActivityReport({ startTime, endTime })
+    
+    if (activityData.totalActions > 0) {
+      const report = await aiService.analyzeUserActivity(activityData)
+      activityReport.value = report
+    } else {
+      activityReport.value = '今日暂无活动数据可供分析。'
+    }
+  } catch (error) {
+    console.error('Error in generateActivityReport:', error)
+  }
+}
+
+const copyActivityReport = () => {
+  try {
+    navigator.clipboard.writeText(activityReport.value)
+    // 检查utools.showNotification方法是否存在
+    if (typeof utools !== 'undefined' && typeof utools.showNotification === 'function') {
+      utools.showNotification('活动报告已复制到剪贴板')
+    } else {
+      console.log('活动报告已复制到剪贴板')
+    }
+  } catch (error) {
+    console.error('Error in copyActivityReport:', error)
   }
 }
 
@@ -304,9 +356,8 @@ onMounted(async () => {
 }
 
 .app-icon {
-  width: 24px;
-  height: 24px;
-  border-radius: 4px;
+  font-size: 24px;
+  margin-right: 10px;
 }
 
 .app-name {
