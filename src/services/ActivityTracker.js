@@ -9,22 +9,24 @@ export class ActivityTracker {
     this.userActions = []
     this.windowHistory = []
     this.lastWindow = null
+    this.screenshots = []
   }
 
   loadData() {
     try {
       const stored = localStorage.getItem('focusflow-data')
-      return stored ? JSON.parse(stored) : { sessions: [], daily: {}, userActions: [] }
+      return stored ? JSON.parse(stored) : { sessions: [], daily: {}, userActions: [], screenshots: [] }
     } catch (error) {
       console.error('Failed to load data:', error)
-      return { sessions: [], daily: {}, userActions: [] }
+      return { sessions: [], daily: {}, userActions: [], screenshots: [] }
     }
   }
 
   saveData() {
     try {
-      // 保存用户操作记录
+      // 保存用户操作记录和截图
       this.data.userActions = this.userActions
+      this.data.screenshots = this.screenshots
       localStorage.setItem('focusflow-data', JSON.stringify(this.data))
     } catch (error) {
       console.error('Failed to save data:', error)
@@ -37,6 +39,7 @@ export class ActivityTracker {
     this.isTracking = true
     this.currentApp = await this.getCurrentApp()
     this.startTime = Date.now()
+    this.screenshots = []
 
     // 开始监听应用切换
     this.startAppListener()
@@ -62,12 +65,39 @@ export class ActivityTracker {
   }
 
   startAppListener() {
-    // 监听应用切换
+    // 监听应用切换和截图
     this.appListenerInterval = setInterval(async () => {
+      console.log('Checking for app switch and capturing screenshot', 
+        typeof window.captureScreen, this.isTracking)
+      
       if (!this.isTracking) return
+      
+      console.log('Current app:', this.currentApp)
 
       try {
+        console.log('Current in try')
+        // 截图
+        if (typeof window.captureScreen === 'function') {
+          console.log('Capturing screenshot')
+          const screenshot = await window.captureScreen()
+          console.log('Screenshot captured:', screenshot)
+          if (screenshot) {
+            const screenshotData = {
+              imageData: screenshot,
+              timestamp: Date.now(),
+              app: this.currentApp,
+              time: dayjs().format('HH:mm:ss')
+            }
+            console.log('Screenshot data:', screenshotData)
+            this.saveScreenshot(screenshotData)
+            this.recordUserAction('screenshot', { app: this.currentApp })
+            console.log('Screenshot captured for app:', this.currentApp)
+          }
+        }
+
+        // 检查应用切换
         const newApp = await this.getCurrentApp()
+        console.log('Current app:', newApp)
         if (newApp !== this.currentApp) {
           // 应用切换
           if (this.currentApp && this.startTime) {
@@ -87,7 +117,7 @@ export class ActivityTracker {
       } catch (error) {
         console.error('Error in app listener:', error)
       }
-    }, 1000) // 每秒检查一次
+    }, 10000) // 每10秒检查一次
   }
 
   stopAppListener() {
@@ -99,9 +129,9 @@ export class ActivityTracker {
 
   async getCurrentApp() {
     try {
-      if (typeof utools !== 'undefined' && typeof utools.getCurrentWindow === 'function') {
-        const windowInfo = utools.getCurrentWindow()
-        return windowInfo.process.name || '未知应用'
+      if (typeof window.getCurrentAppName === 'function') {
+        const appName = window.getCurrentAppName()
+        return appName || '未知应用'
       } else {
         // 模拟数据
         const apps = ['Chrome', 'VS Code', '微信', 'Finder', '终端']
@@ -387,4 +417,24 @@ export class ActivityTracker {
       focusScore: this.calculateFocusScore(this.getUserActions())
     }
   }
-}
+
+  // 获取截图数据
+  getScreenshots() {
+    return this.screenshots
+  }
+
+  // 保存截图数据
+  saveScreenshot(screenshotData) {
+    try {
+      // 添加截图到数组
+      this.screenshots.push(screenshotData)
+      
+      // 保存到本地存储
+      this.saveData()
+      
+      console.log('Screenshot saved successfully')
+    } catch (error) {
+      console.error('Failed to save screenshot:', error)
+    }
+  }
+} 

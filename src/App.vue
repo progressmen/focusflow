@@ -79,6 +79,21 @@
           <button class="btn btn-secondary" @click="copyActivityReport">复制报告</button>
         </div>
       </div>
+
+      <div v-if="screenshots.length > 0" class="screenshots-section">
+        <h2>截图记录</h2>
+        <div class="screenshots-grid">
+          <div v-for="(screenshot, index) in screenshots" :key="index" class="screenshot-item">
+            <div class="screenshot-info">
+              <span class="screenshot-time">{{ screenshot.time }}</span>
+              <span class="screenshot-app">{{ screenshot.app }}</span>
+            </div>
+            <div class="screenshot-preview">
+              <img :src="screenshot.imageData" :alt="`Screenshot ${index + 1}`" class="screenshot-img">
+            </div>
+          </div>
+        </div>
+      </div>
     </main>
   </div>
 </template>
@@ -106,6 +121,7 @@ const topApps = ref([])
 const chartData = ref([])
 const aiReport = ref('')
 const activityReport = ref('')
+const screenshots = ref([])
 
 const formatTime = (seconds) => {
   const hours = Math.floor(seconds / 3600)
@@ -144,6 +160,11 @@ const updateStats = async () => {
     const chart = await activityTracker.getChartData()
     chartData.value = chart
     console.log('Chart data:', chart)
+
+    // 获取截图数据
+    const screenshotData = activityTracker.getScreenshots()
+    screenshots.value = screenshotData
+    console.log('Screenshots:', screenshotData)
   } catch (error) {
     console.error('Error in updateStats:', error)
   }
@@ -405,6 +426,73 @@ onMounted(async () => {
   line-height: 1.6;
   color: #2c3e50;
   margin-bottom: 15px;
+}
+
+.screenshots-section {
+  background: white;
+  padding: 20px;
+  border-radius: 8px;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+  margin-bottom: 20px;
+}
+
+.screenshots-section h2 {
+  margin: 0 0 20px 0;
+  color: #2c3e50;
+}
+
+.screenshots-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 15px;
+}
+
+.screenshot-item {
+  background: #f8f9fa;
+  padding: 15px;
+  border-radius: 6px;
+  border-left: 4px solid #2ecc71;
+}
+
+.screenshot-info {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 10px;
+}
+
+.screenshot-time {
+  font-weight: 500;
+  color: #2c3e50;
+  font-size: 14px;
+}
+
+.screenshot-app {
+  font-size: 14px;
+  color: #7f8c8d;
+  background: #ecf0f1;
+  padding: 4px 8px;
+  border-radius: 12px;
+}
+
+.screenshot-preview {
+  width: 100%;
+  max-width: 400px;
+  overflow: hidden;
+  border-radius: 4px;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+
+.screenshot-img {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+
+@media (max-width: 768px) {
+  .screenshot-preview {
+    max-width: 100%;
+  }
 }
 
 @media (max-width: 768px) {
