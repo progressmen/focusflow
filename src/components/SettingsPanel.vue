@@ -51,6 +51,20 @@
           class="form-input"
         />
       </div>
+    </div>
+
+    <div class="settings-section">
+      <h3>截图设置</h3>
+      <div class="form-group">
+        <label for="screenshot-dir">截图保存目录</label>
+        <input
+          id="screenshot-dir"
+          v-model="settings.screenshotDir"
+          type="text"
+          class="form-input"
+        />
+        <button class="btn btn-secondary mt-2" @click="selectScreenshotDir">选择目录</button>
+      </div>
       <button class="btn btn-primary" @click="saveSettings">保存设置</button>
     </div>
 
@@ -100,12 +114,20 @@ const apiKey = ref('')
 const settings = reactive({
   autoStart: false,
   notifications: true,
-  checkInterval: 1
+  checkInterval: 1,
+  screenshotDir: ''
 })
 
 const loadSettings = () => {
-  const savedSettings = Storage.get('focusflow-settings', {})
-  Object.assign(settings, savedSettings)
+  // 从 uTools 数据库加载设置
+  if (typeof window.getSettingsFromDb === 'function') {
+    const savedSettings = window.getSettingsFromDb()
+    Object.assign(settings, savedSettings)
+  } else {
+    //  fallback to localStorage
+    const savedSettings = Storage.get('focusflow-settings', {})
+    Object.assign(settings, savedSettings)
+  }
 
   const savedApiKey = localStorage.getItem('focusflow-ai-api-key')
   if (savedApiKey) {
@@ -115,13 +137,23 @@ const loadSettings = () => {
 
 const saveApiKey = () => {
   aiService.setApiKey(apiKey.value)
-  utools?.showNotification('API Key 已保存')
+  if (typeof utools !== 'undefined' && typeof utools.showNotification === 'function') {
+    utools.showNotification('API Key 已保存')
+  }
 }
 
 const saveSettings = () => {
-  Storage.set('focusflow-settings', { ...settings })
+  // 保存到 uTools 数据库
+  if (typeof window.saveSettingsToDb === 'function') {
+    window.saveSettingsToDb(settings)
+  } else {
+    //  fallback to localStorage
+    Storage.set('focusflow-settings', { ...settings })
+  }
   emit('settings-updated', settings)
-  utools?.showNotification('设置已保存')
+  if (typeof utools !== 'undefined' && typeof utools.showNotification === 'function') {
+    utools.showNotification('设置已保存')
+  }
 }
 
 const exportData = () => {
@@ -173,6 +205,31 @@ const openHomepage = () => {
 const reportIssue = () => {
   if (utools) {
     utools.shellOpenExternal('https://github.com/yourname/focusflow/issues')
+  }
+}
+
+const selectScreenshotDir = () => {
+  try {
+    if (typeof utools !== 'undefined' && typeof utools.showOpenDialog === 'function') {
+      utools.showOpenDialog({
+        title: '选择截图保存目录',
+        properties: ['openDirectory']
+      }, (files) => {
+        if (files && files.length > 0) {
+          settings.screenshotDir = files[0]
+          console.log('Selected screenshot directory:', files[0])
+        }
+      })
+    } else {
+      console.error('showOpenDialog API not available')
+      // 模拟选择目录
+      const defaultDir = process.env.HOME || process.env.USERPROFILE
+      const screenshotsDir = `${defaultDir}/Pictures/FocusFlow`
+      settings.screenshotDir = screenshotsDir
+      console.log('Simulated screenshot directory:', screenshotsDir)
+    }
+  } catch (error) {
+    console.error('Failed to select screenshot directory:', error)
   }
 }
 

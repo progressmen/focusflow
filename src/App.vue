@@ -81,15 +81,34 @@
       </div>
 
       <div v-if="screenshots.length > 0" class="screenshots-section">
-        <h2>截图记录</h2>
+        <div class="screenshots-header">
+          <h2>截图记录</h2>
+          <button class="btn btn-secondary" @click="openScreenshotDir">打开截图目录</button>
+        </div>
         <div class="screenshots-grid">
           <div v-for="(screenshot, index) in screenshots" :key="index" class="screenshot-item">
             <div class="screenshot-info">
               <span class="screenshot-time">{{ screenshot.time }}</span>
               <span class="screenshot-app">{{ screenshot.app }}</span>
+              <span v-if="screenshot.filePath" class="screenshot-path">{{ screenshot.filePath }}</span>
             </div>
             <div class="screenshot-preview">
               <img :src="screenshot.imageData" :alt="`Screenshot ${index + 1}`" class="screenshot-img">
+            </div>
+          </div>
+        </div>
+        <div class="screenshot-video-section">
+          <h3>截图视频</h3>
+          <div class="video-controls">
+            <button class="btn btn-primary" @click="startScreenshotVideo">开始播放</button>
+            <input type="range" v-model="videoProgress" min="0" :max="screenshots.length - 1" class="progress-bar">
+            <span>{{ currentScreenshotIndex + 1 }} / {{ screenshots.length }}</span>
+          </div>
+          <div v-if="currentScreenshot" class="video-preview">
+            <img :src="currentScreenshot.imageData" :alt="`Screenshot ${currentScreenshotIndex + 1}`" class="video-img">
+            <div class="video-info">
+              <span>{{ currentScreenshot.time }}</span>
+              <span>{{ currentScreenshot.app }}</span>
             </div>
           </div>
         </div>
@@ -109,7 +128,21 @@ console.log('App.vue script started')
 const activityTracker = new ActivityTracker()
 const aiService = new AIService()
 
-const isTracking = ref(false)
+// 从数据库中获取追踪状态，默认为false
+const loadTrackingState = () => {
+  try {
+    if (typeof window.getSettingsFromDb === 'function') {
+      const settings = window.getSettingsFromDb()
+      return settings.isTracking || false
+    }
+    return false
+  } catch (error) {
+    console.error('Failed to load tracking state:', error)
+    return false
+  }
+}
+
+const isTracking = ref(loadTrackingState())
 const todayStats = ref({
   totalTime: 0,
   activeApps: 0,
@@ -122,6 +155,10 @@ const chartData = ref([])
 const aiReport = ref('')
 const activityReport = ref('')
 const screenshots = ref([])
+const videoProgress = ref(0)
+const currentScreenshotIndex = ref(0)
+const videoInterval = ref(null)
+const isPlaying = ref(false)
 
 const formatTime = (seconds) => {
   const hours = Math.floor(seconds / 3600)
@@ -162,7 +199,7 @@ const updateStats = async () => {
     console.log('Chart data:', chart)
 
     // 获取截图数据
-    const screenshotData = activityTracker.getScreenshots()
+    const screenshotData = await activityTracker.getScreenshots()
     screenshots.value = screenshotData
     console.log('Screenshots:', screenshotData)
   } catch (error) {
@@ -225,6 +262,103 @@ const copyActivityReport = () => {
   } catch (error) {
     console.error('Error in copyActivityReport:', error)
   }
+}
+
+// 计算属性：当前截图
+const currentScreenshot = computed(() => {
+  if (screenshots.value.length === 0) return null
+  return screenshots.value[currentScreenshotIndex.value]
+})
+
+// 打开截图目录
+const openScreenshotDir = () => {
+  try {
+    console.log('Opening screenshot directory...')
+    // 获取截图保存目录
+    const settings = JSON.parse(localStorage.getItem('focusflow-settings') || '{}')
+    let dir = settings.screenshotDir || ''
+    
+    // 如果没有设置目录，使用默认目录
+    console.log('settings.screenshotDir process dir:', 
+    settings.screenshotDir,process.env.HOME,process.env.USERPROFILE)
+    if (!dir) {
+      const homeDir = process.env.HOME || process.env.USERPROFILE || '/Users/zhaoqi'
+      dir = `${homeDir}/Pictures/FocusFlow`
+    }
+    
+    // 使用window.shellOpenPath调用preload.js中定义的方法
+    if (typeof window.shellOpenPath === 'function') {
+      const result = window.shellOpenPath(dir)
+      if (result) {
+        console.log('Opened screenshot directory:', dir)
+      } else {
+        console.error('Failed to open screenshot directory')
+      }
+    } else {
+      console.error('shellOpenPath function not available')
+    }
+  } catch (error) {
+    console.error('Failed to open screenshot directory:', error)
+  }
+}
+
+// 开始/暂停截图视频播放
+const startScreenshotVideo = () => {
+  if (isPlaying.value) {
+    // 暂停播放
+    clearInterval(videoInterval.value)
+    videoInterval.value = null
+    isPlaying.value = false
+  } else {
+    // 开始播放
+    if (screenshots.value.length === 0) return
+    
+    videoInterval.value = setInterval(() => {
+      currentScreenshotIndex.value = (currentScreenshotIndex.value + 1) % screenshots.value.length
+      videoProgress.value = currentScreenshotIndex.value
+    }, 500) // 每500毫秒切换一张截图
+    
+    isPlaying.value = true
+  }
+}
+
+// 压缩截图
+const compressScreenshot = (imageData) => {
+  return new Promise((resolve) => {
+    const img = new Image()
+    img.src = imageData
+    
+    img.onload = () => {
+      const canvas = document.createElement('canvas')
+      const ctx = canvas.getContext('2d')
+      
+      // 计算压缩后的尺寸，保持 aspect ratio
+      const maxWidth = 1280
+      const maxHeight = 720
+      let width = img.width
+      let height = img.height
+      
+      if (width > maxWidth) {
+        height = height * (maxWidth / width)
+        width = maxWidth
+      }
+      
+      if (height > maxHeight) {
+        width = width * (maxHeight / height)
+        height = maxHeight
+      }
+      
+      canvas.width = width
+      canvas.height = height
+      
+      // 绘制压缩后的图像
+      ctx.drawImage(img, 0, 0, width, height)
+      
+      // 转换为base64，质量设置为0.7
+      const compressedData = canvas.toDataURL('image/jpeg', 0.7)
+      resolve(compressedData)
+    }
+  })
 }
 
 onMounted(async () => {
@@ -489,9 +623,115 @@ onMounted(async () => {
   display: block;
 }
 
+.screenshots-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 15px;
+}
+
+.screenshot-path {
+  font-size: 12px;
+  color: #7f8c8d;
+  margin-top: 5px;
+  word-break: break-all;
+  display: block;
+}
+
+.screenshot-video-section {
+  margin-top: 30px;
+  padding-top: 20px;
+  border-top: 1px solid #e1e5e9;
+}
+
+.screenshot-video-section h3 {
+  margin: 0 0 15px 0;
+  color: #2c3e50;
+}
+
+.video-controls {
+  display: flex;
+  align-items: center;
+  gap: 15px;
+  margin-bottom: 20px;
+}
+
+.progress-bar {
+  flex: 1;
+  height: 6px;
+  border-radius: 3px;
+  background: #ecf0f1;
+  outline: none;
+  -webkit-appearance: none;
+}
+
+.progress-bar::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #3498db;
+  cursor: pointer;
+}
+
+.progress-bar::-moz-range-thumb {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #3498db;
+  cursor: pointer;
+  border: none;
+}
+
+.video-preview {
+  background: #f8f9fa;
+  padding: 20px;
+  border-radius: 6px;
+  border-left: 4px solid #3498db;
+}
+
+.video-img {
+  width: 100%;
+  height: auto;
+  display: block;
+  border-radius: 4px;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+  margin-bottom: 15px;
+}
+
+.video-info {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.video-info span {
+  font-size: 14px;
+  color: #2c3e50;
+}
+
 @media (max-width: 768px) {
   .screenshot-preview {
     max-width: 100%;
+  }
+  
+  .screenshots-header {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 10px;
+  }
+  
+  .video-controls {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
+  }
+  
+  .video-info {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 5px;
   }
 }
 
