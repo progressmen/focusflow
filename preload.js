@@ -57,9 +57,9 @@ if (typeof utools !== 'undefined') {
     }
   }
   
-  // 获取当前时间对应的整10分钟时间戳
+  // 获取当前时间对应的整10分钟时间戳（秒级）
   window.getRoundedTime = (time = Date.now()) => {
-    return Math.floor(time / (10 * 60 * 1000)) * (10 * 60 * 1000)
+    return Math.floor(time / (10 * 60 * 1000)) * (10 * 60)
   }
   
   // 存储截图到 uTools 本地数据库（使用附件存储）
@@ -493,9 +493,9 @@ if (typeof utools !== 'undefined') {
     }
   }
   
-  // 获取当前时间对应的整10分钟时间戳（开发环境模拟）
+  // 获取当前时间对应的整10分钟以秒为单位的时间戳 （开发环境模拟）
   window.getRoundedTime = (time = Date.now()) => {
-    return Math.floor(time / (10 * 60 * 1000)) * (10 * 60 * 1000)
+    return Math.floor(time / (10 * 60 * 1000)) * (10 * 60)
   }
   
   // 存储截图到 uTools 本地数据库（开发环境模拟）
