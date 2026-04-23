@@ -377,54 +377,159 @@ export class ActivityTracker {
   }
 
   async getTodayStats() {
-    const today = dayjs().format('YYYY-MM-DD')
-    const dayData = this.data.daily[today]
+    try {
+      // 从数据库中获取今天的时间轴数据
+      if (typeof utools !== 'undefined' && typeof utools.db !== 'undefined') {
+        const today = dayjs().format('YYYY-MM-DD')
+        const startOfDay = dayjs().startOf('day').valueOf()
+        const endOfDay = dayjs().endOf('day').valueOf()
+        
+        // 获取今天的所有时间轴文档
+        const result = utools.db.allDocs({ 
+          include_docs: true,
+          startkey: 'roundedTime/',
+          endkey: 'roundedTime/\uffff'
+        })
+        
+        if (result.ok) {
+          // 过滤出今天的文档
+          const todayDocs = result.rows.filter(row => {
+            const timestamp = parseInt(row.doc._id.split('/')[1])
+            return timestamp >= startOfDay && timestamp <= endOfDay
+          })
+          
+          // 统计分类数据
+          const categoryStats = {}
+          let totalTime = 0
+          let activeCategories = 0
+          
+          todayDocs.forEach(row => {
+            const doc = row.doc
+            const categories = Array.isArray(doc.categories) ? doc.categories : (doc.categories ? [doc.categories] : [])
+            
+            categories.forEach(category => {
+              if (!categoryStats[category]) {
+                categoryStats[category] = 0
+                activeCategories++
+              }
+              // 每个时间轴项目默认10分钟
+              categoryStats[category] += 10 * 60 // 转换为秒
+              totalTime += 10 * 60
+            })
+          })
+          
+          const focusScore = this.calculateFocusScore(this.getUserActions())
+          
+          return {
+            totalTime: Math.floor(totalTime),
+            activeCategories: activeCategories,
+            categoryStats: categoryStats,
+            focusScore: focusScore
+          }
+        }
+      }
+      
+      //  fallback到原有的统计方式
+      const today = dayjs().format('YYYY-MM-DD')
+      const dayData = this.data.daily[today]
 
-    if (!dayData) {
+      if (!dayData) {
+        return {
+          totalTime: 0,
+          activeCategories: 0,
+          categoryStats: {},
+          focusScore: 0
+        }
+      }
+
+      const focusScore = this.calculateFocusScore(this.getUserActions())
+
+      return {
+        totalTime: Math.floor(dayData.totalTime / 1000),
+        activeCategories: 0,
+        categoryStats: {},
+        focusScore: focusScore
+      }
+    } catch (error) {
+      console.error('Failed to get today stats:', error)
       return {
         totalTime: 0,
-        activeApps: 0,
-        appSwitches: 0,
+        activeCategories: 0,
+        categoryStats: {},
         focusScore: 0
       }
     }
-
-    const appSwitches = dayData.sessions.length
-    const focusScore = this.calculateFocusScore(this.getUserActions())
-
-    return {
-      totalTime: Math.floor(dayData.totalTime / 1000), // 转换为秒
-      activeApps: Object.keys(dayData.apps).length,
-      appSwitches: appSwitches,
-      focusScore: focusScore
-    }
   }
 
-  async getTopApps(limit = 10) {
-    const today = dayjs().format('YYYY-MM-DD')
-    const dayData = this.data.daily[today]
-
-    if (!dayData || !dayData.apps) {
+  async getTopCategories(limit = 10) {
+    try {
+      // 从数据库中获取今天的时间轴数据
+      if (typeof utools !== 'undefined' && typeof utools.db !== 'undefined') {
+        const today = dayjs().format('YYYY-MM-DD')
+        const startOfDay = dayjs().startOf('day').valueOf()
+        const endOfDay = dayjs().endOf('day').valueOf()
+        
+        // 获取今天的所有时间轴文档
+        const result = utools.db.allDocs({ 
+          include_docs: true,
+          startkey: 'roundedTime/',
+          endkey: 'roundedTime/\uffff'
+        })
+        
+        if (result.ok) {
+          // 过滤出今天的文档
+          const todayDocs = result.rows.filter(row => {
+            const timestamp = parseInt(row.doc._id.split('/')[1])
+            return timestamp >= startOfDay && timestamp <= endOfDay
+          })
+          
+          // 统计分类数据
+          const categoryStats = {}
+          
+          todayDocs.forEach(row => {
+            const doc = row.doc
+            const categories = Array.isArray(doc.categories) ? doc.categories : (doc.categories ? [doc.categories] : [])
+            
+            categories.forEach(category => {
+              if (!categoryStats[category]) {
+                categoryStats[category] = {
+                  time: 0,
+                  sessions: 0
+                }
+              }
+              // 每个时间轴项目默认10分钟
+              categoryStats[category].time += 10 * 60 // 转换为秒
+              categoryStats[category].sessions += 1
+            })
+          })
+          
+          // 转换为数组并排序
+          const categories = Object.entries(categoryStats)
+            .map(([name, data]) => ({
+              name,
+              time: Math.floor(data.time),
+              sessions: data.sessions,
+              icon: this.getCategoryIcon(name)
+            }))
+            .sort((a, b) => b.time - a.time)
+            .slice(0, limit)
+          
+          // 计算百分比
+          const totalTime = categories.reduce((sum, category) => sum + category.time, 0)
+          categories.forEach(category => {
+            category.percentage = totalTime > 0 ? Math.floor((category.time / totalTime) * 100) : 0
+          })
+          
+          return categories
+        }
+      }
+      
+      //  fallback到空数组
+      return []
+    } catch (error) {
+      console.error('Failed to get top categories:', error)
       return []
     }
-
-    const apps = Object.entries(dayData.apps)
-      .map(([name, data]) => ({
-        name,
-        time: Math.floor(data.time / 1000),
-        sessions: data.sessions,
-        icon: this.getAppIcon(name)
-      }))
-      .sort((a, b) => b.time - a.time)
-      .slice(0, limit)
-
-    // 计算百分比
-    const totalTime = apps.reduce((sum, app) => sum + app.time, 0)
-    apps.forEach(app => {
-      app.percentage = totalTime > 0 ? Math.floor((app.time / totalTime) * 100) : 0
-    })
-
-    return apps
   }
 
   getAppIcon(appName) {
@@ -439,41 +544,160 @@ export class ActivityTracker {
     return iconMap[appName] || '📱'
   }
 
-  async getChartData() {
-    const today = dayjs().format('YYYY-MM-DD')
-    const dayData = this.data.daily[today]
+  getCategoryIcon(categoryName) {
+    // 返回分类图标
+    const iconMap = {
+      '工作': '💼',
+      '学习': '📚',
+      '娱乐': '🎮',
+      '社交': '💬',
+      '浏览': '🌐',
+      '编程': '💻',
+      '设计': '🎨',
+      '文档': '📄',
+      '通信': '📞',
+      '其他': '📱'
+    }
+    return iconMap[categoryName] || '📱'
+  }
 
-    if (!dayData || !dayData.apps) {
+  async getChartData() {
+    try {
+      // 从数据库中获取今天的时间轴数据
+      if (typeof utools !== 'undefined' && typeof utools.db !== 'undefined') {
+        const today = dayjs().format('YYYY-MM-DD')
+        const startOfDay = dayjs().startOf('day').valueOf()
+        const endOfDay = dayjs().endOf('day').valueOf()
+        
+        // 获取今天的所有时间轴文档
+        const result = utools.db.allDocs({ 
+          include_docs: true,
+          startkey: 'roundedTime/',
+          endkey: 'roundedTime/\uffff'
+        })
+        
+        if (result.ok) {
+          // 过滤出今天的文档
+          const todayDocs = result.rows.filter(row => {
+            const timestamp = parseInt(row.doc._id.split('/')[1])
+            return timestamp >= startOfDay && timestamp <= endOfDay
+          })
+          
+          // 统计分类数据
+          const categoryStats = {}
+          
+          todayDocs.forEach(row => {
+            const doc = row.doc
+            const categories = Array.isArray(doc.categories) ? doc.categories : (doc.categories ? [doc.categories] : [])
+            
+            categories.forEach(category => {
+              if (!categoryStats[category]) {
+                categoryStats[category] = 0
+              }
+              // 每个时间轴项目默认10分钟
+              categoryStats[category] += 10 // 转换为分钟
+            })
+          })
+          
+          // 转换为数组并排序
+          return Object.entries(categoryStats)
+            .map(([label, value]) => ({
+              label,
+              value
+            }))
+            .sort((a, b) => b.value - a.value)
+            .slice(0, 8)
+        }
+      }
+      
+      //  fallback到空数组
+      return []
+    } catch (error) {
+      console.error('Failed to get chart data:', error)
       return []
     }
-
-    return Object.entries(dayData.apps)
-      .map(([name, data]) => ({
-        label: name,
-        value: Math.floor(data.time / 1000 / 60) // 转换为分钟
-      }))
-      .sort((a, b) => b.value - a.value)
-      .slice(0, 8)
   }
 
   async getTodayData() {
-    const today = dayjs().format('YYYY-MM-DD')
-    const dayData = this.data.daily[today]
+    try {
+      // 从数据库中获取今天的时间轴数据
+      if (typeof utools !== 'undefined' && typeof utools.db !== 'undefined') {
+        const today = dayjs().format('YYYY-MM-DD')
+        const startOfDay = dayjs().startOf('day').valueOf()
+        const endOfDay = dayjs().endOf('day').valueOf()
+        
+        // 获取今天的所有时间轴文档
+        const result = utools.db.allDocs({ 
+          include_docs: true,
+          startkey: 'roundedTime/',
+          endkey: 'roundedTime/\uffff'
+        })
+        
+        if (result.ok) {
+          // 过滤出今天的文档
+          const todayDocs = result.rows.filter(row => {
+            const timestamp = parseInt(row.doc._id.split('/')[1])
+            return timestamp >= startOfDay && timestamp <= endOfDay
+          })
+          
+          // 统计分类数据
+          const categoryStats = {}
+          let totalTime = 0
+          let totalSessions = 0
+          
+          todayDocs.forEach(row => {
+            const doc = row.doc
+            const categories = Array.isArray(doc.categories) ? doc.categories : (doc.categories ? [doc.categories] : [])
+            
+            categories.forEach(category => {
+              if (!categoryStats[category]) {
+                categoryStats[category] = {
+                  time: 0,
+                  sessions: 0
+                }
+              }
+              // 每个时间轴项目默认10分钟
+              categoryStats[category].time += 10 // 转换为分钟
+              categoryStats[category].sessions += 1
+              totalTime += 10
+              totalSessions += 1
+            })
+          })
+          
+          const focusScore = this.calculateFocusScore(this.getUserActions())
+          
+          return {
+            date: today,
+            totalTime: Math.floor(totalTime),
+            categories: Object.entries(categoryStats).map(([name, data]) => ({
+              name,
+              time: Math.floor(data.time),
+              sessions: data.sessions
+            })),
+            sessions: totalSessions,
+            focusScore: focusScore
+          }
+        }
+      }
+      
+      //  fallback到原有的统计方式
+      const today = dayjs().format('YYYY-MM-DD')
+      const dayData = this.data.daily[today]
 
-    if (!dayData) {
+      if (!dayData) {
+        return null
+      }
+
+      return {
+        date: today,
+        totalTime: Math.floor(dayData.totalTime / 1000 / 60),
+        categories: [],
+        sessions: dayData.sessions.length,
+        focusScore: this.calculateFocusScore(this.getUserActions())
+      }
+    } catch (error) {
+      console.error('Failed to get today data:', error)
       return null
-    }
-
-    return {
-      date: today,
-      totalTime: Math.floor(dayData.totalTime / 1000 / 60), // 分钟
-      apps: Object.entries(dayData.apps).map(([name, data]) => ({
-        name,
-        time: Math.floor(data.time / 1000 / 60),
-        sessions: data.sessions
-      })),
-      sessions: dayData.sessions.length,
-      focusScore: this.calculateFocusScore(this.getUserActions())
     }
   }
 

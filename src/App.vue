@@ -62,17 +62,17 @@
           <div class="stat-value">{{ formatTime(todayStats.totalTime) }}</div>
         </div>
         <div class="stat-card">
-          <h3>活跃应用</h3>
-          <div class="stat-value">{{ todayStats.activeApps }}</div>
-        </div>
-        <div class="stat-card">
-          <h3>切换次数</h3>
-          <div class="stat-value">{{ todayStats.appSwitches }}</div>
+          <h3>活跃分类</h3>
+          <div class="stat-value">{{ todayStats.activeCategories }}</div>
         </div>
         <div class="stat-card">
           <h3>专注度</h3>
           <div class="stat-value">{{ todayStats.focusScore }}%</div>
         </div>
+        <!-- <div class="stat-card">
+          <h3>时间轴数</h3>
+          <div class="stat-value">{{ timelineData.length }}</div>
+        </div> -->
       </div>
 
       <div class="charts-section">
@@ -83,18 +83,18 @@
       </div>
 
       <div class="apps-section">
-        <h2>应用使用排行</h2>
+        <h2>分类使用排行</h2>
         <div class="apps-list">
-          <div v-for="app in topApps" :key="app.name" class="app-item">
+          <div v-for="category in topCategories" :key="category.name" class="app-item">
             <div class="app-info">
-              <span class="app-icon">{{ app.icon }}</span>
-              <span class="app-name">{{ app.name }}</span>
+              <span class="app-icon">{{ category.icon }}</span>
+              <span class="app-name">{{ category.name }}</span>
             </div>
             <div class="app-usage">
               <div class="usage-bar">
-                <div class="usage-fill" :style="{ width: app.percentage + '%' }"></div>
+                <div class="usage-fill" :style="{ width: category.percentage + '%' }"></div>
               </div>
-              <span class="usage-time">{{ formatTime(app.time) }}</span>
+              <span class="usage-time">{{ formatTime(category.time) }}</span>
             </div>
           </div>
         </div>
@@ -203,12 +203,12 @@ const loadTrackingState = () => {
 const isTracking = ref(loadTrackingState())
 const todayStats = ref({
   totalTime: 0,
-  activeApps: 0,
-  appSwitches: 0,
+  activeCategories: 0,
+  categoryStats: {},
   focusScore: 0
 })
 
-const topApps = ref([])
+const topCategories = ref([])
 const chartData = ref([])
 const aiReport = ref('')
 const activityReport = ref('')
@@ -369,9 +369,9 @@ const updateStats = async () => {
     todayStats.value = stats
     console.log('Today stats:', stats)
 
-    const apps = await activityTracker.getTopApps(10)
-    topApps.value = apps
-    console.log('Top apps:', apps)
+    const categories = await activityTracker.getTopCategories(10)
+    topCategories.value = categories
+    console.log('Top categories:', categories)
 
     const chart = await activityTracker.getChartData()
     chartData.value = chart
