@@ -175,11 +175,12 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { ActivityTracker } from './services/ActivityTracker'
 import { AIService } from './services/AIService'
 import AppUsageChart from './components/AppUsageChart.vue'
 import { getTodayRoundedTimes } from './utils/time'
+import { getDayRoundedTimes } from './utils/time'
 
 console.log('App.vue script started')
 
@@ -225,7 +226,7 @@ const isPlaying = ref(false)
 const currentDate = ref(new Date())
 const selectedDate = ref(new Date())
 const showDatePicker = ref(false)
-const datesWithData = ref([1, 5, 10, 15, 20, 25]) // 模拟有数据的日期
+// const datesWithData = ref([1, 5, 10, 15, 20, 25]) // 模拟有数据的日期
 
 // 日历计算属性
 const currentYear = computed(() => currentDate.value.getFullYear())
@@ -234,6 +235,29 @@ const currentMonth = computed(() => currentDate.value.getMonth())
 const daysInMonth = computed(() => {
   return new Date(currentYear.value, currentMonth.value + 1, 0).getDate()
 })
+
+// 有数据的日期
+const datesWithData = ref([])
+
+// 加载月份数据
+const loadMonthData = async () => {
+  try {
+    // 月份需要加1并补零，因为JavaScript月份是0-11
+    const month = String(currentMonth.value + 1).padStart(2, '0')
+    console.log('Loading month data for:', currentYear.value, month)
+    const data = await activityTracker.getMonthDataFromDb(currentYear.value, month)
+    datesWithData.value = data || []
+    console.log('Loaded dates with data:', datesWithData.value)
+  } catch (error) {
+    console.error('Failed to load month data:', error)
+    datesWithData.value = []
+  }
+}
+
+// 当月份变化时重新加载数据
+watch([currentYear, currentMonth], () => {
+  loadMonthData()
+}, { immediate: true })
 
 const startEmptyCells = computed(() => {
   const firstDay = new Date(currentYear.value, currentMonth.value, 1).getDay()
@@ -286,6 +310,7 @@ const refreshAllData = async () => {
 }
 
 const hasDataForDate = (day) => {
+  console.log('hasDataForDate:', day, datesWithData)
   return datesWithData.value.includes(day)
 }
 
@@ -353,6 +378,7 @@ const toggleTracking = async () => {
     if (isTracking.value) {
       await activityTracker.stopTracking()
     } else {
+      console.log('Start tracking')
       await activityTracker.startTracking()
     }
     isTracking.value = !isTracking.value
@@ -391,11 +417,16 @@ const loadTimelineData = async () => {
     // 暂时使用模拟数据
 
     // 获取今天所有的key
-    const roundedTimeList =  getTodayRoundedTimes()
-    console.log('roundedTimeList:', roundedTimeList)
+    // const roundedTimeList =  getTodayRoundedTimes()
+    // console.log('roundedTimeList:', roundedTimeList)
+
+    // 获取指定日期所有的key
+    console.log('selectedDate.value:', selectedDate.value.toISOString())
+    const roundedTimeListDay = getDayRoundedTimes(selectedDate.value.toISOString())
+    console.log('roundedTimeListDay:', roundedTimeListDay)
 
     // 批量获取所有时间轴数据
-    const rawResults = await Promise.all(roundedTimeList.map(async (roundedTime) => {
+    const rawResults = await Promise.all(roundedTimeListDay.map(async (roundedTime) => {
       return await activityTracker.getTimelineData(roundedTime)
     }))
 

@@ -129,7 +129,7 @@ if (typeof utools !== 'undefined') {
       return null
     }
   }
-  
+ 
   // 从 uTools 本地数据库获取截图
   window.getScreenshotFromDb = async (screenshotId) => {
     try {
@@ -508,7 +508,7 @@ if (typeof utools !== 'undefined') {
       return null;
     }
   }
-  
+
   // 从 uTools 本地数据库获取截图（开发环境模拟）
   window.getScreenshotFromDb = async (screenshotId) => {
     try {

@@ -23,3 +23,18 @@ export function getTodayRoundedTimes(time = Date.now()) {
   }
   return times
 }
+
+/**
+ * 获取某个日期所有的整10分钟级时间戳数组
+ * 
+ */
+export function getDayRoundedTimes(dayTimeStr) {
+  const todayStart = new Date(dayTimeStr).setHours(0, 0, 0, 0)
+  const todayEnd = new Date(dayTimeStr).setHours(23, 59, 59, 59)
+  
+  const times = []
+  for (let t = todayStart; t <= todayEnd; t += 10 * 60 * 1000) {
+    times.push(getRoundedTime(t))
+  }
+  return times
+}

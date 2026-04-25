@@ -123,6 +123,7 @@ export class ActivityTracker {
     console.log('Activity tracking stopped')
   }
 
+  
   startAppListener() {
     // 监听应用切换和截图
     this.appListenerInterval = setInterval(async () => {
@@ -141,6 +142,7 @@ export class ActivityTracker {
           const screenshot = await window.captureScreen()
           console.log('Screenshot captured:', screenshot)
           if (screenshot) {
+            // screenshotData 结构体
             const screenshotData = {
               imageData: screenshot,
               timestamp: Date.now(),
@@ -151,12 +153,15 @@ export class ActivityTracker {
             await this.saveScreenshot(screenshotData)
             this.recordUserAction('screenshot', { app: this.currentApp })
             console.log('Screenshot captured for app:', this.currentApp)
+
+            // 记录本月数据
+            await this.saveMonthDataToDb()
           }
         }
 
         // 检查应用切换
         const newApp = await this.getCurrentApp()
-        console.log('Current app:', newApp)
+        console.log('Current app2:', newApp)
         if (newApp !== this.currentApp) {
           // 应用切换
           if (this.currentApp && this.startTime) {
@@ -717,7 +722,16 @@ export class ActivityTracker {
       const currentDoc = utools.db.get(docId) || {}
       console.log('roundedTime1 docId: currentDoc', currentDoc)
 
-    
+      // 删除当前文档
+      // if (currentDoc) {
+      //   const result = utools.db.remove(currentDoc);
+      //   if (result.ok) {
+      //     console.log("currentDoc 删除成功");
+      //   } else if (result.error) {
+      //     // 删除失败，打印错误原因
+      //     console.log("currentDoc 删除失败:", result.error.message);
+      //   }
+      // }
 
       // 获取当前文档的截图数组
       const screenshots = currentDoc.screenshots || []
@@ -874,6 +888,87 @@ export class ActivityTracker {
       }
     } catch (error) {
       console.error('Failed to save screenshot to database:', error)
+      return null
+    }
+  }
+
+  async getMonthDataFromDb(year, month) {
+    // 获取本月数据从数据库
+    console.log('Getting month data from database')
+    try {
+      if (typeof utools !== 'undefined' && typeof utools.db !== 'undefined') {
+        
+        const currentMonth = `${year}-${month}`;
+
+        // 文档ID格式：roundedTime/currentMonth
+        const docId = `roundedTime/${currentMonth}`
+        console.log('currentMonth docId:', docId)
+        
+        // 获取当前文档
+        const currentMonthDoc = utools.db.get(docId) || {}
+        console.log('currentMonth docId: currentMonthDoc', currentMonthDoc)
+        
+        return currentMonthDoc.values || []
+      } else {
+        console.error('Database API not available')
+        return null
+      }
+    } catch (error) {
+      console.error('Failed to get month data from database:', error)
+      return null
+    }
+  }
+
+
+  async saveMonthDataToDb() {
+    // 保存本月数据到数据库
+    console.log('Saving month data to database')
+    try {
+      if (typeof utools !== 'undefined' && typeof utools.db !== 'undefined') {
+        
+        const date = new Date();
+        const year = date.getFullYear();
+        // 月份补 0（1-9 变成 01-09）
+        const month = String(date.getMonth() + 1).padStart(2, '0');
+        // 获取几号，数字格式
+        const today = date.getDate()
+        const currentMonth = `${year}-${month}`;
+
+        // 文档ID格式：roundedTime/currentMonth
+        const docId = `roundedTime/${currentMonth}`
+        console.log('currentMonth docId:', docId)
+        
+        // 获取当前文档
+        const currentMonthDoc = utools.db.get(docId) || {}
+        console.log('currentMonth docId: currentMonthDoc', currentMonthDoc)
+        
+        // 创建文档
+        const doc = {
+          _id: docId,
+          values: currentMonthDoc.values || []
+        }
+        if (currentMonthDoc._rev) {
+          doc._rev = currentMonthDoc._rev
+        }
+
+        // 如果values不包含今天日期，则添加
+        if (!doc.values.includes(today)) {
+          doc.values.push(today)
+          console.log('doc:', doc)
+
+          // 保存文档
+          const result = utools.db.put(doc)
+          if (!result.ok) {
+            console.error('Failed to save month data document:', result.message)
+            return null
+          }
+        }
+      } else {
+        console.error('Database API not available')
+        return null
+      }
+    } catch (error) {
+      console.error('Failed to save month data to database:', error)
       return null
     }
   }
