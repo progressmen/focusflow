@@ -220,7 +220,6 @@ if (typeof utools !== 'undefined') {
 
         // 转换为base64
         const base64Data = await convertBinaryToBase64(attachment)
-        console.log('base64Data:', base64Data)
         return base64Data
       } else {
         console.error('Database API not available')

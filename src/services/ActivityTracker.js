@@ -711,7 +711,7 @@ export class ActivityTracker {
     try {
 
       // 将roundedTime秒级时间戳转换为10:00-10:10格式
-      const roundedTimeStr = this.formatTimeMinute(roundedTime*1000-(10*60*1000)) + "-" + this.formatTimeMinute(roundedTime*1000)
+      const roundedTimeStr = this.formatTimeMinute(roundedTime*1000) + "-" + this.formatTimeMinute(roundedTime*1000+(10*60*1000))
 
       // 文档ID格式：screenshot/roundedTime
       const docId = `roundedTime/${roundedTime}`
