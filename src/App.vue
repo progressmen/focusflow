@@ -52,8 +52,18 @@
         <button class="btn btn-primary" @click="generateActivityReport">
           活动分析报告
         </button>
+        <button class="btn btn-secondary" @click="showSettings = true">
+          设置
+        </button>
       </div>
     </header>
+
+    <!-- 设置面板 -->
+    <SettingsPanel 
+      v-if="showSettings" 
+      @close="showSettings = false" 
+      @settings-updated="onSettingsUpdated"
+    />
 
     <main class="app-main">
       <div class="stats-grid">
@@ -179,6 +189,7 @@ import { ref, computed, onMounted, watch } from 'vue'
 import { ActivityTracker } from './services/ActivityTracker'
 import { AIService } from './services/AIService'
 import AppUsageChart from './components/AppUsageChart.vue'
+import SettingsPanel from './components/SettingsPanel.vue'
 import { getTodayRoundedTimes } from './utils/time'
 import { getDayRoundedTimes } from './utils/time'
 
@@ -202,6 +213,11 @@ const loadTrackingState = () => {
 }
 
 const isTracking = ref(loadTrackingState())
+const showSettings = ref(false)
+
+const onSettingsUpdated = () => {
+  // 设置更新后的回调
+}
 const todayStats = ref({
   totalTime: 0,
   activeCategories: 0,
@@ -643,11 +659,17 @@ const compressScreenshot = (imageData) => {
 
 onMounted(async () => {
   try {
-    console.log('onMounted called')
+    // 监听 uTools 进入事件
+    window.addEventListener('utools:enter', (event) => {
+      const { code, type, payload } = event.detail || {}
+      if (code === 'settings') {
+        showSettings.value = true
+      }
+    })
+
     await updateStats()
-    console.log('onMounted completed')
   } catch (error) {
-    console.error('Error in onMounted:', error)
+    // Silent fail
   }
 })
 </script>
