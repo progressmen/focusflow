@@ -81,6 +81,11 @@ const colors = [
   '#9b59b6', '#1abc9c', '#34495e', '#e67e22'
 ]
 
+const resolveBackgroundColors = (items) => {
+  // 优先使用每项自带的 color（如分类配置的颜色），否则回退到调色板
+  return items.map((item, idx) => item.color || colors[idx % colors.length])
+}
+
 const createChart = () => {
   if (!chartRef.value || !props.data.length) return
 
@@ -90,7 +95,7 @@ const createChart = () => {
     labels: props.data.map(item => item.label),
     datasets: [{
       data: props.data.map(item => item.value),
-      backgroundColor: colors.slice(0, props.data.length),
+      backgroundColor: resolveBackgroundColors(props.data),
       borderColor: '#ffffff',
       borderWidth: 2
     }]
@@ -119,8 +124,8 @@ const createChart = () => {
               const label = context.label || ''
               const value = context.raw || 0
               const total = context.dataset.data.reduce((a, b) => a + b, 0)
-              const percentage = ((value / total) * 100).toFixed(1)
-              return `${label}: ${value}分钟 (${percentage}%)`
+              const percentage = total > 0 ? ((value / total) * 100).toFixed(1) : '0.0'
+              return `${label}: ${value} 个时段 (${percentage}%)`
             }
           }
         }

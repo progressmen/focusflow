@@ -1,1102 +1,734 @@
 import dayjs from 'dayjs'
-import { getRoundedTime } from '../utils/time.js'
+import { getRoundedTime, getDayRoundedTimes } from '../utils/time.js'
+import AIService from './AIService.js'
+import settingsService from './Settings.js'
 
+/**
+ * 活动追踪服务
+ * 依赖 preload.js 暴露的 window.* API：
+ *   getCurrentAppName, captureScreen, saveScreenshotToDb,
+ *   getScreenshotFromDb, getTimelineSlot, saveTimelineSlot,
+ *   getMonthDates, markDateHasData, getSettingsFromDb, saveSettingsToDb
+ */
 export class ActivityTracker {
   constructor() {
     this.isTracking = false
     this.currentApp = null
     this.startTime = null
-    this.data = this.loadData()
-    this.userActions = []
-    this.windowHistory = []
-    this.lastWindow = null
-    this.screenshots = []
-    this.timelineData = []
+    this.currentSession = null
+    this.checkInterval = null
+    this.screenshotInterval = null
+    // 当前生效的截图间隔（毫秒）
+    this.screenshotIntervalMs = 30000
+    this.aiService = new AIService()
+    // 正在 AI 分析中的 slot id 集合（roundedSec 数字）
+    this._analyzingSlots = new Set()
+    // 分析状态变更订阅者：(payload: { id, analyzing, success?, result?, error? }) => void
+    this._stateListeners = new Set()
+    // 「上一时段巡检」定时器（每分钟检查一次，独立于截图节奏）
+    this._slotSweepTimer = null
   }
 
-  loadData() {
-    try {
-      // 尝试从 uTools 数据库加载数据
-      if (typeof window.getSettingsFromDb === 'function') {
-        const settings = window.getSettingsFromDb()
-        // 这里可以从设置中获取追踪状态等信息
-        console.log('Loaded settings from database:', settings)
+  /**
+   * 订阅 AI 分析状态变更
+   * 回调 payload:
+   *   { id: number, analyzing: true }                 -- 开始分析
+   *   { id: number, analyzing: false, success: true, result }  -- 分析完成
+   *   { id: number, analyzing: false, success: false, error }  -- 分析失败
+   * @returns 取消订阅函数
+   */
+  onAnalysisStateChange(listener) {
+    if (typeof listener !== 'function') return () => {}
+    this._stateListeners.add(listener)
+    return () => this._stateListeners.delete(listener)
+  }
+
+  _emitState(payload) {
+    this._stateListeners.forEach((fn) => {
+      try {
+        fn(payload)
+      } catch (e) {
+        console.error('[FocusFlow] analysis listener 抛错:', e)
       }
-      
-      // 暂时使用localStorage作为备份
-      const stored = localStorage.getItem('focusflow-data')
-      return stored ? JSON.parse(stored) : { sessions: [], daily: {}, userActions: [], screenshots: [] }
-    } catch (error) {
-      console.error('Failed to load data:', error)
-      return { sessions: [], daily: {}, userActions: [], screenshots: [] }
-    }
+    })
   }
 
-  saveData() {
+  /**
+   * 外部查询某个 slot 是否正在分析（供 UI 初始渲染同步状态用）
+   */
+  isAnalyzingSlot(roundedSec) {
+    return this._analyzingSlots.has(Number(roundedSec))
+  }
+
+  /**
+   * 外部查询所有正在分析的 slot id
+   */
+  listAnalyzingSlots() {
+    return Array.from(this._analyzingSlots)
+  }
+
+  // ========== 开关追踪 ==========
+
+  /**
+   * 从设置中读取截图间隔（秒），并返回毫秒
+   * 最小 5 秒、最大 600 秒，回退到 30 秒
+   */
+  resolveScreenshotIntervalMs() {
     try {
-      // 保存用户操作记录和截图
-      this.data.userActions = this.userActions
-      this.data.screenshots = this.screenshots
-      
-      // 保存到localStorage作为备份
-      localStorage.setItem('focusflow-data', JSON.stringify(this.data))
-      
-      // 保存设置到 uTools 数据库
-      if (typeof window.saveSettingsToDb === 'function') {
-        const settings = {
-          isTracking: this.isTracking,
-          currentApp: this.currentApp,
-          startTime: this.startTime
-        }
-        window.saveSettingsToDb(settings)
-      }
-    } catch (error) {
-      console.error('Failed to save data:', error)
+      const tracking = settingsService.loadTrackingSettings()
+      let sec = Number(tracking.screenshotInterval) || 30
+      if (sec < 5) sec = 5
+      if (sec > 600) sec = 600
+      return sec * 1000
+    } catch (e) {
+      return 30000
     }
-  }
-
-  // 将timestamp转换为时分秒格式
-  formatTime(timestamp) {
-    const date = new Date(timestamp)
-    const hours = String(date.getHours()).padStart(2, '0')
-    const minutes = String(date.getMinutes()).padStart(2, '0')
-    const seconds = String(date.getSeconds()).padStart(2, '0')
-    return `${hours}:${minutes}:${seconds}`
-  }
-
-  formatTimeMinute(timestamp) {
-    const date = new Date(timestamp)
-    const hours = String(date.getHours()).padStart(2, '0')
-    const minutes = String(date.getMinutes()).padStart(2, '0')
-    return `${hours}:${minutes}`
   }
 
   async startTracking() {
     if (this.isTracking) return
-
     this.isTracking = true
-    this.currentApp = await this.getCurrentApp()
+    this.currentApp = await this.detectCurrentApp()
     this.startTime = Date.now()
-    this.screenshots = []
+    this.currentSession = this.newSession(this.currentApp, this.startTime)
 
-    // 开始监听应用切换
-    this.startAppListener()
+    // 每 3 秒检查一次应用切换
+    this.checkInterval = setInterval(() => this.tick(), 3000)
+    // 按设置启动截图定时器
+    this.screenshotIntervalMs = this.resolveScreenshotIntervalMs()
+    this.screenshotInterval = setInterval(() => this.takeAndSaveScreenshot(), this.screenshotIntervalMs)
+    console.log('[FocusFlow] 截图间隔:', this.screenshotIntervalMs / 1000, '秒')
 
-    // 保存追踪状态到 uTools 数据库
-    if (typeof window.saveSettingsToDb === 'function') {
-      const settings = {
-        isTracking: this.isTracking,
-        currentApp: this.currentApp,
-        startTime: this.startTime
-      }
-      window.saveSettingsToDb(settings)
+    // 立即先截一张，保证有数据
+    this.takeAndSaveScreenshot()
+
+    // 启动「上一时段巡检」定时器：每分钟扫一次，确保即使没有新截图也能在跨入新时段后触发上段分析
+    this._startSlotSweepTimer()
+    // 立即跑一次（覆盖刚启动追踪时已经跨过整 10 分钟边界的场景）
+    setTimeout(() => this._sweepPreviousSlot(), 500)
+
+    // 保存状态到设置
+    this.persistTrackingState()
+    console.log('[FocusFlow] 开始追踪:', this.currentApp)
+  }
+
+  /**
+   * 启动「上一时段巡检」定时器（每 60 秒一次）
+   * 每 10 分钟跨段边界后，最坏 60 秒内会触发上一时段的 AI 分析
+   */
+  _startSlotSweepTimer() {
+    if (this._slotSweepTimer) {
+      clearInterval(this._slotSweepTimer)
     }
+    this._slotSweepTimer = setInterval(() => this._sweepPreviousSlot(), 60 * 1000)
+  }
 
-    console.log('Activity tracking started')
+  _stopSlotSweepTimer() {
+    if (this._slotSweepTimer) {
+      clearInterval(this._slotSweepTimer)
+      this._slotSweepTimer = null
+    }
+  }
+
+  /**
+   * 扫一次：若上一时段已结束且未分析过 → 异步触发 AI 分析
+   * （内部直接调 analyzePreviousSlotIfNeeded，并发由 analyzeSlot 的锁兜底）
+   */
+  _sweepPreviousSlot() {
+    this.analyzePreviousSlotIfNeeded(Date.now()).catch((e) =>
+      console.warn('[FocusFlow] _sweepPreviousSlot 异步分析失败：', e && e.message)
+    )
+  }
+
+  /**
+   * 重启截图定时器：在设置中的截图间隔变化后调用
+   * 如果当前未在追踪，则什么都不做
+   * 返回新的截图间隔（秒）
+   */
+  restartScreenshotTimer() {
+    if (!this.isTracking) return 0
+    if (this.screenshotInterval) {
+      clearInterval(this.screenshotInterval)
+      this.screenshotInterval = null
+    }
+    this.screenshotIntervalMs = this.resolveScreenshotIntervalMs()
+    this.screenshotInterval = setInterval(() => this.takeAndSaveScreenshot(), this.screenshotIntervalMs)
+    console.log('[FocusFlow] 截图间隔已更新:', this.screenshotIntervalMs / 1000, '秒')
+    return this.screenshotIntervalMs / 1000
   }
 
   async stopTracking() {
     if (!this.isTracking) return
-
     this.isTracking = false
 
-    // 结束当前会话
-    if (this.currentApp && this.startTime) {
-      await this.endSession(this.currentApp, this.startTime, Date.now())
+    if (this.checkInterval) {
+      clearInterval(this.checkInterval)
+      this.checkInterval = null
+    }
+    if (this.screenshotInterval) {
+      clearInterval(this.screenshotInterval)
+      this.screenshotInterval = null
+    }
+    // 关掉「上一时段巡检」定时器
+    this._stopSlotSweepTimer()
+
+    // 结束当前 session
+    if (this.currentSession) {
+      this.currentSession.end = Date.now()
+      this.currentSession.duration = this.currentSession.end - this.currentSession.start
+      this.persistSession(this.currentSession)
+      this.currentSession = null
     }
 
-    this.stopAppListener()
-    this.currentApp = null
-    this.startTime = null
-
-    // 保存追踪状态到 uTools 数据库
-    if (typeof window.saveSettingsToDb === 'function') {
-      const settings = {
-        isTracking: this.isTracking,
-        currentApp: this.currentApp,
-        startTime: this.startTime
-      }
-      console.log('Saving settings:', settings)
-      window.saveSettingsToDb(settings)
-    }
-
-    console.log('Activity tracking stopped')
+    this.persistTrackingState()
+    console.log('[FocusFlow] 停止追踪')
   }
 
-  
-  startAppListener() {
-    // 监听应用切换和截图
-    this.appListenerInterval = setInterval(async () => {
-      console.log('Checking for app switch and capturing screenshot', 
-        typeof window.captureScreen, this.isTracking)
-      
-      if (!this.isTracking) return
-      
-      console.log('Current app:', this.currentApp)
+  // ========== 轮询逻辑 ==========
+
+  async tick() {
+    try {
+      const nextApp = await this.detectCurrentApp()
+      if (nextApp !== this.currentApp) {
+        // 应用切换：结束旧 session，开始新 session
+        const now = Date.now()
+        if (this.currentSession) {
+          this.currentSession.end = now
+          this.currentSession.duration = now - this.currentSession.start
+          this.persistSession(this.currentSession)
+        }
+        this.currentApp = nextApp
+        this.currentSession = this.newSession(nextApp, now)
+        console.log('[FocusFlow] 切换应用:', nextApp)
+      }
+    } catch (e) {
+      console.error('[FocusFlow] tick 异常:', e)
+    }
+  }
+
+  async takeAndSaveScreenshot() {
+    try {
+      if (typeof window.captureScreen !== 'function') return
+      const imageData = await window.captureScreen()
+      if (!imageData) return
+
+      const now = Date.now()
+      const screenshotData = {
+        imageData,
+        app: this.currentApp || '未知应用',
+        time: dayjs(now).format('YYYY-MM-DD HH:mm:ss'),
+        timestamp: now
+      }
+
+      if (typeof window.saveScreenshotToDb === 'function') {
+        const id = await window.saveScreenshotToDb(screenshotData)
+        if (id) console.log('[FocusFlow] 截图已保存:', id)
+      }
+
+      // 尝试分析「上一个已完成的时间槽」（当前槽还在累积，不分析）
+      this.analyzePreviousSlotIfNeeded(now).catch((e) =>
+        console.warn('[FocusFlow] 异步分析上一时段失败：', e && e.message)
+      )
+    } catch (e) {
+      console.error('[FocusFlow] 截图失败:', e)
+    }
+  }
+
+  /**
+   * 上一个时间槽（10 分钟前的整 10 分钟段）若已结束且未分析过，则触发 AI 分析
+   */
+  async analyzePreviousSlotIfNeeded(nowMs = Date.now()) {
+    try {
+      const TEN_MIN_MS = 10 * 60 * 1000
+      // 当前所在时段的起始秒
+      const currentSlotSec = Math.floor(nowMs / TEN_MIN_MS) * 600
+      // 上一个时段的起始秒
+      const prevSlotSec = currentSlotSec - 600
+      // 该上一时段必须已结束（即 nowMs >= prevSlotSec*1000 + 10min）
+      if (nowMs < prevSlotSec * 1000 + TEN_MIN_MS) return
+
+      const slot = window.getTimelineSlot ? window.getTimelineSlot(prevSlotSec) : null
+      if (!slot || !Array.isArray(slot.screenshots) || slot.screenshots.length === 0) return
+      // 已分析过则跳过
+      if (slot.title && slot.summary && Array.isArray(slot.categories) && slot.categories.length > 0) return
 
       try {
-        console.log('Current in try')
-        // 截图
-        if (typeof window.captureScreen === 'function') {
-          console.log('Capturing screenshot')
-          const screenshot = await window.captureScreen()
-          console.log('Screenshot captured:', screenshot)
-          if (screenshot) {
-            // screenshotData 结构体
-            const screenshotData = {
-              imageData: screenshot,
-              timestamp: Date.now(),
-              app: this.currentApp,
-              time: dayjs().format('HH:mm:ss')
-            }
-            console.log('Screenshot data:', screenshotData)
-            await this.saveScreenshot(screenshotData)
-            this.recordUserAction('screenshot', { app: this.currentApp })
-            console.log('Screenshot captured for app:', this.currentApp)
-
-            // 记录本月数据
-            await this.saveMonthDataToDb()
-          }
-        }
-
-        // 检查应用切换
-        const newApp = await this.getCurrentApp()
-        console.log('Current app2:', newApp)
-        if (newApp !== this.currentApp) {
-          // 应用切换
-          if (this.currentApp && this.startTime) {
-            await this.endSession(this.currentApp, this.startTime, Date.now())
-          }
-
-          // 记录应用切换事件
-          this.recordUserAction('app_switch', {
-            from: this.currentApp,
-            to: newApp
-          })
-
-          this.currentApp = newApp
-          this.startTime = Date.now()
-          console.log('App switched to:', newApp)
-        }
-      } catch (error) {
-        console.error('Error in app listener:', error)
+        await this.analyzeSlot(prevSlotSec)
+      } catch (e) {
+        // 自动触发的 AI 分析失败不打扰用户，只在控制台留痕
+        console.warn('[FocusFlow] 自动 AI 分析跳过：', e && e.message)
       }
-    }, 3000) // 每3秒检查一次
-  }
-
-  stopAppListener() {
-    if (this.appListenerInterval) {
-      clearInterval(this.appListenerInterval)
-      this.appListenerInterval = null
+    } catch (e) {
+      console.error('[FocusFlow] analyzePreviousSlotIfNeeded 失败:', e)
     }
   }
 
-  async getCurrentApp() {
+  /**
+   * 显式分析某个时间槽（可在 UI 中手动触发）
+   * 失败时抛出带原因的 Error，便于 UI 展示
+   */
+  async analyzeSlot(roundedSec) {
+    const id = Number(roundedSec)
+    // 并发互斥：同一时段不重入（自动触发 + 用户手动点击 可能并发）
+    if (this._analyzingSlots.has(id)) {
+      console.log('[FocusFlow] analyzeSlot 跳过：已有分析在进行', id)
+      return null
+    }
+    this._analyzingSlots.add(id)
+    this._emitState({ id, analyzing: true })
+
+    try {
+      const settings = settingsService.loadSettings()
+      const model = settings.aiModel || ''
+      const apiKey = (settings.apiKeys && settings.apiKeys[model]) || ''
+      if (!model) {
+        throw new Error('未选择 AI 模型，请前往「设置 → AI 设置」选择模型')
+      }
+      if (!apiKey) {
+        throw new Error(`未配置 ${model} 的 API Key，请前往「设置 → AI 设置」填写`)
+      }
+
+      const slot = window.getTimelineSlot ? window.getTimelineSlot(roundedSec) : null
+      if (!slot) {
+        throw new Error(`找不到时间槽 timeslot/${roundedSec}`)
+      }
+      if (!Array.isArray(slot.screenshots) || slot.screenshots.length === 0) {
+        throw new Error('当前时间槽没有截图')
+      }
+
+      // 加载截图原图（任何一张失败都继续，但全部失败则报错）
+      console.log('[FocusFlow] analyzeSlot：开始加载', slot.screenshots.length, '张截图')
+      const screenshots = []
+      const failedDocs = []
+      for (const s of slot.screenshots) {
+        try {
+          const img = window.getScreenshotFromDb ? await window.getScreenshotFromDb(s.docId) : null
+          if (img) {
+            screenshots.push({ imageData: img, app: s.app, time: s.time })
+          } else {
+            failedDocs.push(s.docId)
+          }
+        } catch (e) {
+          failedDocs.push(s.docId)
+          console.warn('[FocusFlow] 加载截图失败:', s.docId, e)
+        }
+      }
+      if (screenshots.length === 0) {
+        throw new Error(
+          `所有截图加载失败（共 ${slot.screenshots.length} 张），可能是附件丢失。请尝试清空当日数据后重新追踪。`
+        )
+      }
+      if (failedDocs.length > 0) {
+        console.warn('[FocusFlow] 部分截图加载失败：', failedDocs)
+      }
+
+      const timeLabel = slot.time || formatTimeslot(roundedSec)
+      const categories = Array.isArray(settings.categories) ? settings.categories : []
+      if (categories.length === 0) {
+        console.warn('[FocusFlow] 未配置任何分类，AI 可能无法准确归类')
+      }
+      console.log('[FocusFlow] analyzeSlot：调用 AI', {
+        model,
+        roundedSec,
+        images: screenshots.length,
+        categories: categories.map((c) => c.name),
+        timeLabel
+      })
+
+      let result
+      try {
+        const modelName = (settings.aiModelNames && settings.aiModelNames[model]) || ''
+        result = await this.aiService.analyzeTimeslot({
+          model,
+          modelName,
+          apiKey,
+          categories,
+          defaultCategory: settings.defaultCategory || '',
+          screenshots,
+          timeLabel
+        })
+      } catch (e) {
+        console.error('[FocusFlow] aiService.analyzeTimeslot 抛出异常:', e)
+        throw new Error(`AI 调用失败：${(e && e.message) || e}`)
+      }
+
+      if (!result || (!result.title && !result.summary && (!result.categories || result.categories.length === 0))) {
+        console.error('[FocusFlow] AI 返回空结果或无法解析:', result)
+        throw new Error('AI 返回结果为空或无法解析，请检查模型是否支持图片、或控制台日志')
+      }
+
+      // 写回 timeslot 文档
+      try {
+        if (typeof window.saveTimelineSlot === 'function') {
+          const saved = window.saveTimelineSlot(roundedSec, {
+            title: result.title,
+            summary: result.summary,
+            detail: result.detail,
+            categories: result.categories,
+            time: timeLabel
+          })
+          if (!saved) {
+            console.warn('[FocusFlow] 写回 timeslot 失败')
+          }
+        }
+      } catch (e) {
+        console.error('[FocusFlow] 写回 timeslot 异常:', e)
+        // 不阻断主流程，仅记录
+      }
+
+      console.log('[FocusFlow] AI 分析完成:', result)
+      this._emitState({ id, analyzing: false, success: true, result })
+      return result
+    } catch (e) {
+      this._emitState({ id, analyzing: false, success: false, error: e })
+      throw e
+    } finally {
+      this._analyzingSlots.delete(id)
+    }
+  }
+
+  // ========== 读取与汇总 ==========
+
+  /**
+   * 获取指定日期所有时间槽数据（含截图 docId 列表）
+   * 优先用 preload 暴露的 listTimelineSlotsByDate（基于 utools.db.allDocs，最准确）
+   * 回退到按时间循环 + 单条 get（兼容旧实现）
+   */
+  async loadTimelineForDate(dateStr) {
+    try {
+      let rawSlots = []
+      if (typeof window.listTimelineSlotsByDate === 'function') {
+        rawSlots = window.listTimelineSlotsByDate(dateStr) || []
+      } else {
+        const roundedTimes = getDayRoundedTimes(dateStr)
+        for (const rt of roundedTimes) {
+          const slot = window.getTimelineSlot ? window.getTimelineSlot(rt) : null
+          if (slot) rawSlots.push(slot)
+        }
+      }
+      const slots = []
+      for (const slot of rawSlots) {
+        if (!slot || !Array.isArray(slot.screenshots) || slot.screenshots.length === 0) continue
+        const id = slot._id
+          ? Number(String(slot._id).replace('timeslot/', ''))
+          : null
+        slots.push({
+          id: id,
+          time: slot.time || (id ? formatTimeslot(id) : ''),
+          title: slot.title || '',
+          categories: slot.categories || [],
+          summary: slot.summary || '',
+          detail: slot.detail || '',
+          screenshots: slot.screenshots || []
+        })
+      }
+      console.log('[FocusFlow] loadTimelineForDate', dateStr, '→', slots.length, '个有效时间槽')
+      return slots
+    } catch (e) {
+      console.error('[FocusFlow] loadTimelineForDate 失败:', e)
+      return []
+    }
+  }
+
+  /**
+   * 批量读取某个日期所有截图的 imageData（用于播放器）
+   */
+  async loadScreenshotsForSlot(roundedSeconds) {
+    try {
+      const slot = window.getTimelineSlot ? window.getTimelineSlot(roundedSeconds) : null
+      if (!slot || !slot.screenshots || slot.screenshots.length === 0) return []
+      const results = await Promise.all(
+        slot.screenshots.map(async (s) => {
+          const img = window.getScreenshotFromDb ? await window.getScreenshotFromDb(s.docId) : null
+          return {
+            docId: s.docId,
+            app: s.app,
+            time: s.time,
+            timestamp: s.timestamp,
+            imageData: img
+          }
+        })
+      )
+      return results
+    } catch (e) {
+      console.error('[FocusFlow] loadScreenshotsForSlot 失败:', e)
+      return []
+    }
+  }
+
+  /**
+   * 今日统计：基于 timeslot 中聚合的数据 + session 时长
+   */
+  async getTodayStats() {
+    try {
+      const today = dayjs().format('YYYY-MM-DD')
+      const slots = await this.loadTimelineForDate(today)
+      // 统计活跃应用（从 screenshots 中提取）
+      const appCount = new Map()
+      let totalScreenshots = 0
+      slots.forEach((s) => {
+        s.screenshots.forEach((sc) => {
+          appCount.set(sc.app, (appCount.get(sc.app) || 0) + 1)
+          totalScreenshots++
+        })
+      })
+      const totalSessions = slots.length
+      const activeApps = appCount.size
+      // 专注度：活跃应用数越少，专注度越高（至少 20，最高 100）
+      const focusScore = Math.max(20, 100 - (activeApps - 1) * 10 - totalSessions * 0.5)
+      return {
+        date: today,
+        totalScreenshots,
+        activeApps,
+        totalSessions,
+        focusScore: Math.min(100, Math.floor(focusScore))
+      }
+    } catch (e) {
+      console.error('[FocusFlow] getTodayStats 失败:', e)
+      return { totalScreenshots: 0, activeApps: 0, totalSessions: 0, focusScore: 0 }
+    }
+  }
+
+  /**
+   * 今日分类排行（从截图 app 字段聚合，简单按应用分组）
+   */
+  async getTopApps(limit = 8) {
+    try {
+      const today = dayjs().format('YYYY-MM-DD')
+      const slots = await this.loadTimelineForDate(today)
+      const appCount = new Map()
+      let total = 0
+      slots.forEach((s) => {
+        s.screenshots.forEach((sc) => {
+          const app = sc.app || '未知应用'
+          appCount.set(app, (appCount.get(app) || 0) + 1)
+          total++
+        })
+      })
+      const entries = Array.from(appCount.entries())
+        .map(([name, count]) => ({
+          name,
+          count,
+          percent: total > 0 ? Math.floor((count / total) * 100) : 0
+        }))
+        .sort((a, b) => b.count - a.count)
+        .slice(0, limit)
+      return entries
+    } catch (e) {
+      console.error('[FocusFlow] getTopApps 失败:', e)
+      return []
+    }
+  }
+
+  /**
+   * 图表数据：按应用统计截图数（条形/饼图通用）
+   */
+  async getChartData() {
+    const apps = await this.getTopApps(8)
+    return apps.map((a) => ({ label: a.name, value: a.count }))
+  }
+
+  async getMonthData(year, month) {
+    try {
+      if (typeof window.getMonthDates === 'function') {
+        return window.getMonthDates(year, month)
+      }
+      return []
+    } catch (e) {
+      console.error('[FocusFlow] getMonthData 失败:', e)
+      return []
+    }
+  }
+
+  // ========== AI 日报告 ==========
+
+  /**
+   * 读取某一天已生成的日报告（不存在返回 null）
+   */
+  loadDailyReport(dateStr) {
+    try {
+      if (typeof window.getDailyReport !== 'function') return null
+      return window.getDailyReport(dateStr) || null
+    } catch (e) {
+      console.error('[FocusFlow] loadDailyReport 失败:', e)
+      return null
+    }
+  }
+
+  /**
+   * 生成某一天的 AI 日报告
+   * - 若该日已存在报告且未传 force=true，则直接返回缓存
+   * - 必须当天至少有 1 个时段（无所谓是否分析过；未分析的就以「未分类」名义带进 prompt）
+   * @param {string} dateStr 'YYYY-MM-DD'
+   * @param {Object} [opts]
+   * @param {boolean} [opts.force=false] 强制重新生成
+   * @param {Object}  [opts.stats]  顶部统计卡的数值（可选，写进报告 metadata）
+   * @returns {Promise<{content, model, generatedAt, slotCount, stats, cached}>}
+   */
+  async generateDailyReport(dateStr, opts = {}) {
+    if (!dateStr) throw new Error('缺少日期参数')
+
+    // 1. 已有缓存且非强制重生 → 直接返回
+    if (!opts.force) {
+      const cached = this.loadDailyReport(dateStr)
+      if (cached && cached.content) {
+        console.log('[FocusFlow] 使用缓存日报告:', dateStr)
+        return { ...cached, cached: true }
+      }
+    }
+
+    // 2. AI 配置校验
+    const settings = settingsService.loadSettings()
+    const model = settings.aiModel || ''
+    const apiKey = (settings.apiKeys && settings.apiKeys[model]) || ''
+    if (!model) throw new Error('未选择 AI 模型，请前往「设置 → AI 设置」选择模型')
+    if (!apiKey) throw new Error(`未配置 ${model} 的 API Key，请前往「设置 → AI 设置」填写`)
+
+    // 3. 收集当天所有时段
+    const allSlots = await this.loadTimelineForDate(dateStr)
+    if (!allSlots || allSlots.length === 0) {
+      throw new Error(`${dateStr} 当天没有任何时段数据，无法生成报告`)
+    }
+
+    // 4. 只把「有意义」的字段交给 AI（标题/摘要/分类/时间）
+    const slimSlots = allSlots.map((s) => ({
+      time: s.time || '',
+      title: s.title || '',
+      summary: s.summary || '',
+      categories: Array.isArray(s.categories) ? s.categories : []
+    }))
+
+    const modelName = (settings.aiModelNames && settings.aiModelNames[model]) || ''
+    const categories = Array.isArray(settings.categories) ? settings.categories : []
+
+    console.log('[FocusFlow] generateDailyReport：', {
+      dateStr,
+      model,
+      modelName,
+      slotCount: slimSlots.length,
+      force: !!opts.force
+    })
+
+    let result
+    try {
+      result = await this.aiService.generateDailyReport({
+        model,
+        modelName,
+        apiKey,
+        dateStr,
+        slots: slimSlots,
+        stats: opts.stats || null,
+        categories
+      })
+    } catch (e) {
+      console.error('[FocusFlow] aiService.generateDailyReport 抛出异常:', e)
+      throw new Error(`AI 调用失败：${(e && e.message) || e}`)
+    }
+
+    const payload = {
+      content: result.content,
+      model: result.model || model,
+      generatedAt: Date.now(),
+      slotCount: slimSlots.length,
+      stats: opts.stats || null
+    }
+
+    // 5. 写回 db
+    try {
+      if (typeof window.saveDailyReport === 'function') {
+        const ok = window.saveDailyReport(dateStr, payload)
+        if (!ok) console.warn('[FocusFlow] saveDailyReport 返回 false')
+      }
+    } catch (e) {
+      console.error('[FocusFlow] saveDailyReport 异常:', e)
+    }
+
+    return { ...payload, cached: false }
+  }
+
+  /**
+   * 删除某一天的日报告（用于「清空数据」时同步清理）
+   */
+  removeDailyReport(dateStr) {
+    try {
+      if (typeof window.removeDailyReport === 'function') {
+        return window.removeDailyReport(dateStr)
+      }
+    } catch (e) {
+      console.error('[FocusFlow] removeDailyReport 失败:', e)
+    }
+    return false
+  }
+
+  // ========== 存储辅助 ==========
+
+  detectCurrentApp() {
     try {
       if (typeof window.getCurrentAppName === 'function') {
-        const appName = window.getCurrentAppName()
-        return appName || '未知应用'
-      } else {
-        // 模拟数据
-        const apps = ['Chrome', 'VS Code', '微信', 'Finder', '终端']
-        return apps[Math.floor(Math.random() * apps.length)]
+        return window.getCurrentAppName()
       }
-    } catch (error) {
-      console.error('Failed to get current app:', error)
+      return '未知应用'
+    } catch (e) {
       return '未知应用'
     }
   }
 
-  async getCurrentWindow() {
-    try {
-      if (typeof utools !== 'undefined' && typeof utools.getCurrentWindow === 'function') {
-        return utools.getCurrentWindow()
-      } else {
-        // 模拟数据
-        return {
-          title: document.title,
-          process: { name: 'browser', path: window.location.href }
-        }
-      }
-    } catch (error) {
-      console.error('Failed to get current window:', error)
-      return null
-    }
-  }
-
-  async endSession(appName, startTime, endTime) {
-    const duration = endTime - startTime
-    const today = dayjs().format('YYYY-MM-DD')
-
-    // 保存会话记录
-    const session = {
-      app: appName,
-      start: startTime,
-      end: endTime,
-      duration: duration,
-      date: today
-    }
-
-    this.data.sessions.push(session)
-
-    // 更新每日统计
-    if (!this.data.daily[today]) {
-      this.data.daily[today] = {
-        totalTime: 0,
-        sessions: [],
-        apps: {}
-      }
-    }
-
-    const dayData = this.data.daily[today]
-    dayData.totalTime += duration
-    dayData.sessions.push(session)
-
-    if (!dayData.apps[appName]) {
-      dayData.apps[appName] = {
-        time: 0,
-        sessions: 0
-      }
-    }
-
-    dayData.apps[appName].time += duration
-    dayData.apps[appName].sessions += 1
-
-    this.saveData()
-  }
-
-  // 记录用户操作
-  recordUserAction(actionType, details) {
-    const action = {
-      type: actionType,
-      details: details,
-      timestamp: Date.now(),
-      date: dayjs().format('YYYY-MM-DD'),
-      time: dayjs().format('HH:mm:ss')
-    }
-    this.userActions.push(action)
-    
-    // 限制记录数量，避免内存占用过大
-    if (this.userActions.length > 1000) {
-      this.userActions.shift()
-    }
-    
-    console.log('User action recorded:', action)
-  }
-
-  // 获取用户操作记录
-  getUserActions(timeRange) {
-    if (!timeRange) {
-      return this.userActions
-    }
-    const { startTime, endTime } = timeRange
-    return this.userActions.filter(action => 
-      action.timestamp >= startTime && action.timestamp <= endTime
-    )
-  }
-
-  // 生成用户活动报告
-  generateActivityReport(timeRange) {
-    const actions = this.getUserActions(timeRange)
-    const appUsage = this.getAppUsage(actions)
-    
+  newSession(app, start) {
     return {
-      totalActions: actions.length,
-      appSwitches: actions.filter(a => a.type === 'app_switch').length,
-      mostActiveApps: this.getMostActiveApps(appUsage),
-      timeDistribution: this.getTimeDistribution(actions),
-      focusScore: this.calculateFocusScore(actions)
+      app,
+      start,
+      end: null,
+      duration: 0,
+      date: dayjs(start).format('YYYY-MM-DD')
     }
   }
 
-  // 获取应用使用情况
-  getAppUsage(actions) {
-    const appUsage = {}
-    
-    // 分析应用切换事件
-    for (let i = 0; i < actions.length; i++) {
-      const action = actions[i]
-      if (action.type === 'app_switch' && action.details.to) {
-        const appName = action.details.to
-        if (!appUsage[appName]) {
-          appUsage[appName] = {
-            startTime: action.timestamp,
-            endTime: action.timestamp,
-            totalTime: 0
-          }
-        } else {
-          // 更新上一个应用的结束时间和使用时长
-          appUsage[appName].endTime = action.timestamp
-          appUsage[appName].totalTime += action.timestamp - appUsage[appName].startTime
-          // 开始新应用的计时
-          appUsage[action.details.to] = {
-            startTime: action.timestamp,
-            endTime: action.timestamp,
-            totalTime: 0
-          }
-        }
-      }
-    }
-    
-    return appUsage
-  }
-
-  // 获取最活跃的应用
-  getMostActiveApps(appUsage) {
-    return Object.entries(appUsage)
-      .map(([name, data]) => ({
-        name,
-        usageTime: Math.floor(data.totalTime / 1000 / 60) // 转换为分钟
-      }))
-      .sort((a, b) => b.usageTime - a.usageTime)
-      .slice(0, 5)
-  }
-
-  // 获取时间分布
-  getTimeDistribution(actions) {
-    const hours = {}
-    
-    actions.forEach(action => {
-      const hour = new Date(action.timestamp).getHours()
-      if (!hours[hour]) {
-        hours[hour] = 0
-      }
-      hours[hour]++
-    })
-    
-    return hours
-  }
-
-  // 计算专注度分数
-  calculateFocusScore(actions) {
-    if (!actions.length) return 0
-
-    // 分析应用切换频率
-    const appSwitches = actions.filter(a => a.type === 'app_switch').length
-    const totalTime = actions[actions.length - 1].timestamp - actions[0].timestamp
-    const switchRate = appSwitches / (totalTime / 1000 / 60) // 每分钟切换次数
-
-    // 切换频率越低，专注度越高
-    let focusScore = Math.max(0, 100 - (switchRate * 10))
-    return Math.floor(focusScore)
-  }
-
-  async getTodayStats() {
+  persistSession(session) {
+    // session 数据直接存在 localStorage 中，用于显示使用时长汇总（可选）
     try {
-      // 从数据库中获取今天的时间轴数据
-      if (typeof utools !== 'undefined' && typeof utools.db !== 'undefined') {
-        const today = dayjs().format('YYYY-MM-DD')
-        const startOfDay = dayjs().startOf('day').valueOf()
-        const endOfDay = dayjs().endOf('day').valueOf()
-        
-        // 获取今天的所有时间轴文档
-        const result = utools.db.allDocs({ 
-          include_docs: true,
-          startkey: 'roundedTime/',
-          endkey: 'roundedTime/\uffff'
-        })
-        
-        if (result.ok) {
-          // 过滤出今天的文档
-          const todayDocs = result.rows.filter(row => {
-            const timestamp = parseInt(row.doc._id.split('/')[1])
-            return timestamp >= startOfDay && timestamp <= endOfDay
-          })
-          
-          // 统计分类数据
-          const categoryStats = {}
-          let totalTime = 0
-          let activeCategories = 0
-          
-          todayDocs.forEach(row => {
-            const doc = row.doc
-            const categories = Array.isArray(doc.categories) ? doc.categories : (doc.categories ? [doc.categories] : [])
-            
-            categories.forEach(category => {
-              if (!categoryStats[category]) {
-                categoryStats[category] = 0
-                activeCategories++
-              }
-              // 每个时间轴项目默认10分钟
-              categoryStats[category] += 10 * 60 // 转换为秒
-              totalTime += 10 * 60
-            })
-          })
-          
-          const focusScore = this.calculateFocusScore(this.getUserActions())
-          
-          return {
-            totalTime: Math.floor(totalTime),
-            activeCategories: activeCategories,
-            categoryStats: categoryStats,
-            focusScore: focusScore
-          }
-        }
-      }
-      
-      //  fallback到原有的统计方式
-      const today = dayjs().format('YYYY-MM-DD')
-      const dayData = this.data.daily[today]
-
-      if (!dayData) {
-        return {
-          totalTime: 0,
-          activeCategories: 0,
-          categoryStats: {},
-          focusScore: 0
-        }
-      }
-
-      const focusScore = this.calculateFocusScore(this.getUserActions())
-
-      return {
-        totalTime: Math.floor(dayData.totalTime / 1000),
-        activeCategories: 0,
-        categoryStats: {},
-        focusScore: focusScore
-      }
-    } catch (error) {
-      console.error('Failed to get today stats:', error)
-      return {
-        totalTime: 0,
-        activeCategories: 0,
-        categoryStats: {},
-        focusScore: 0
-      }
+      const key = 'focusflow-sessions'
+      const raw = localStorage.getItem(key)
+      const list = raw ? JSON.parse(raw) : []
+      list.push(session)
+      // 只保留最近 1000 条，避免膨胀
+      if (list.length > 1000) list.splice(0, list.length - 1000)
+      localStorage.setItem(key, JSON.stringify(list))
+    } catch (e) {
+      console.error('[FocusFlow] persistSession 失败:', e)
     }
   }
 
-  async getTopCategories(limit = 10) {
+  persistTrackingState() {
+    if (typeof window.saveSettingsToDb === 'function') {
+      window.saveSettingsToDb({
+        _id: 'settings/focusflow',
+        isTracking: this.isTracking
+      })
+    }
+  }
+
+  /**
+   * 更新时间槽的 AI 汇总信息（标题、分类、摘要、详情）
+   */
+  updateTimelineSlot(roundedSeconds, patch) {
     try {
-      // 从数据库中获取今天的时间轴数据
-      if (typeof utools !== 'undefined' && typeof utools.db !== 'undefined') {
-        const today = dayjs().format('YYYY-MM-DD')
-        const startOfDay = dayjs().startOf('day').valueOf()
-        const endOfDay = dayjs().endOf('day').valueOf()
-        
-        // 获取今天的所有时间轴文档
-        const result = utools.db.allDocs({ 
-          include_docs: true,
-          startkey: 'roundedTime/',
-          endkey: 'roundedTime/\uffff'
-        })
-        
-        if (result.ok) {
-          // 过滤出今天的文档
-          const todayDocs = result.rows.filter(row => {
-            const timestamp = parseInt(row.doc._id.split('/')[1])
-            return timestamp >= startOfDay && timestamp <= endOfDay
-          })
-          
-          // 统计分类数据
-          const categoryStats = {}
-          
-          todayDocs.forEach(row => {
-            const doc = row.doc
-            const categories = Array.isArray(doc.categories) ? doc.categories : (doc.categories ? [doc.categories] : [])
-            
-            categories.forEach(category => {
-              if (!categoryStats[category]) {
-                categoryStats[category] = {
-                  time: 0,
-                  sessions: 0
-                }
-              }
-              // 每个时间轴项目默认10分钟
-              categoryStats[category].time += 10 * 60 // 转换为秒
-              categoryStats[category].sessions += 1
-            })
-          })
-          
-          // 转换为数组并排序
-          const categories = Object.entries(categoryStats)
-            .map(([name, data]) => ({
-              name,
-              time: Math.floor(data.time),
-              sessions: data.sessions,
-              icon: this.getCategoryIcon(name)
-            }))
-            .sort((a, b) => b.time - a.time)
-            .slice(0, limit)
-          
-          // 计算百分比
-          const totalTime = categories.reduce((sum, category) => sum + category.time, 0)
-          categories.forEach(category => {
-            category.percentage = totalTime > 0 ? Math.floor((category.time / totalTime) * 100) : 0
-          })
-          
-          return categories
-        }
-      }
-      
-      //  fallback到空数组
-      return []
-    } catch (error) {
-      console.error('Failed to get top categories:', error)
-      return []
+      if (typeof window.saveTimelineSlot !== 'function') return false
+      return window.saveTimelineSlot(roundedSeconds, patch)
+    } catch (e) {
+      console.error('[FocusFlow] updateTimelineSlot 失败:', e)
+      return false
     }
   }
+}
 
-  getAppIcon(appName) {
-    // 返回应用图标（实际项目中需要提供真实的图标）
-    const iconMap = {
-      'Chrome': '🌐',
-      'VS Code': '💻',
-      '微信': '💬',
-      'Finder': '📁',
-      '终端': '⌨️'
-    }
-    return iconMap[appName] || '📱'
-  }
+function formatTimeslot(roundedSeconds) {
+  const d = new Date(roundedSeconds * 1000)
+  const hh = String(d.getHours()).padStart(2, '0')
+  const mm = String(d.getMinutes()).padStart(2, '0')
+  const end = new Date(roundedSeconds * 1000 + 10 * 60 * 1000)
+  const eh = String(end.getHours()).padStart(2, '0')
+  const em = String(end.getMinutes()).padStart(2, '0')
+  return `${hh}:${mm} - ${eh}:${em}`
+}
 
-  getCategoryIcon(categoryName) {
-    // 返回分类图标
-    const iconMap = {
-      '工作': '💼',
-      '学习': '📚',
-      '娱乐': '🎮',
-      '社交': '💬',
-      '浏览': '🌐',
-      '编程': '💻',
-      '设计': '🎨',
-      '文档': '📄',
-      '通信': '📞',
-      '其他': '📱'
-    }
-    return iconMap[categoryName] || '📱'
-  }
-
-  async getChartData() {
-    try {
-      // 从数据库中获取今天的时间轴数据
-      if (typeof utools !== 'undefined' && typeof utools.db !== 'undefined') {
-        const today = dayjs().format('YYYY-MM-DD')
-        const startOfDay = dayjs().startOf('day').valueOf()
-        const endOfDay = dayjs().endOf('day').valueOf()
-        
-        // 获取今天的所有时间轴文档
-        const result = utools.db.allDocs({ 
-          include_docs: true,
-          startkey: 'roundedTime/',
-          endkey: 'roundedTime/\uffff'
-        })
-        
-        if (result.ok) {
-          // 过滤出今天的文档
-          const todayDocs = result.rows.filter(row => {
-            const timestamp = parseInt(row.doc._id.split('/')[1])
-            return timestamp >= startOfDay && timestamp <= endOfDay
-          })
-          
-          // 统计分类数据
-          const categoryStats = {}
-          
-          todayDocs.forEach(row => {
-            const doc = row.doc
-            const categories = Array.isArray(doc.categories) ? doc.categories : (doc.categories ? [doc.categories] : [])
-            
-            categories.forEach(category => {
-              if (!categoryStats[category]) {
-                categoryStats[category] = 0
-              }
-              // 每个时间轴项目默认10分钟
-              categoryStats[category] += 10 // 转换为分钟
-            })
-          })
-          
-          // 转换为数组并排序
-          return Object.entries(categoryStats)
-            .map(([label, value]) => ({
-              label,
-              value
-            }))
-            .sort((a, b) => b.value - a.value)
-            .slice(0, 8)
-        }
-      }
-      
-      //  fallback到空数组
-      return []
-    } catch (error) {
-      console.error('Failed to get chart data:', error)
-      return []
-    }
-  }
-
-  async getTodayData() {
-    try {
-      // 从数据库中获取今天的时间轴数据
-      if (typeof utools !== 'undefined' && typeof utools.db !== 'undefined') {
-        const today = dayjs().format('YYYY-MM-DD')
-        const startOfDay = dayjs().startOf('day').valueOf()
-        const endOfDay = dayjs().endOf('day').valueOf()
-        
-        // 获取今天的所有时间轴文档
-        const result = utools.db.allDocs({ 
-          include_docs: true,
-          startkey: 'roundedTime/',
-          endkey: 'roundedTime/\uffff'
-        })
-        
-        if (result.ok) {
-          // 过滤出今天的文档
-          const todayDocs = result.rows.filter(row => {
-            const timestamp = parseInt(row.doc._id.split('/')[1])
-            return timestamp >= startOfDay && timestamp <= endOfDay
-          })
-          
-          // 统计分类数据
-          const categoryStats = {}
-          let totalTime = 0
-          let totalSessions = 0
-          
-          todayDocs.forEach(row => {
-            const doc = row.doc
-            const categories = Array.isArray(doc.categories) ? doc.categories : (doc.categories ? [doc.categories] : [])
-            
-            categories.forEach(category => {
-              if (!categoryStats[category]) {
-                categoryStats[category] = {
-                  time: 0,
-                  sessions: 0
-                }
-              }
-              // 每个时间轴项目默认10分钟
-              categoryStats[category].time += 10 // 转换为分钟
-              categoryStats[category].sessions += 1
-              totalTime += 10
-              totalSessions += 1
-            })
-          })
-          
-          const focusScore = this.calculateFocusScore(this.getUserActions())
-          
-          return {
-            date: today,
-            totalTime: Math.floor(totalTime),
-            categories: Object.entries(categoryStats).map(([name, data]) => ({
-              name,
-              time: Math.floor(data.time),
-              sessions: data.sessions
-            })),
-            sessions: totalSessions,
-            focusScore: focusScore
-          }
-        }
-      }
-      
-      //  fallback到原有的统计方式
-      const today = dayjs().format('YYYY-MM-DD')
-      const dayData = this.data.daily[today]
-
-      if (!dayData) {
-        return null
-      }
-
-      return {
-        date: today,
-        totalTime: Math.floor(dayData.totalTime / 1000 / 60),
-        categories: [],
-        sessions: dayData.sessions.length,
-        focusScore: this.calculateFocusScore(this.getUserActions())
-      }
-    } catch (error) {
-      console.error('Failed to get today data:', error)
-      return null
-    }
-  }
-
-  // 获取截图数据
-  async getTimelineData(roundedTime) {
-    try {
-
-      // 将roundedTime秒级时间戳转换为10:00-10:10格式
-      const roundedTimeStr = this.formatTimeMinute(roundedTime*1000) + "-" + this.formatTimeMinute(roundedTime*1000+(10*60*1000))
-
-      // 文档ID格式：screenshot/roundedTime
-      const docId = `roundedTime/${roundedTime}`
-      console.log('roundedTime1 docId:', docId)
-
-
-      // 获取当前文档
-      const currentDoc = utools.db.get(docId) || {}
-      console.log('roundedTime1 docId: currentDoc', currentDoc)
-
-      // 删除当前文档
-      // if (currentDoc) {
-      //   const result = utools.db.remove(currentDoc);
-      //   if (result.ok) {
-      //     console.log("currentDoc 删除成功");
-      //   } else if (result.error) {
-      //     // 删除失败，打印错误原因
-      //     console.log("currentDoc 删除失败:", result.error.message);
-      //   }
-      // }
-
-      // 获取当前文档的截图数组
-      const screenshots = currentDoc.screenshots || []
-      console.log('roundedTime1 docId: screenshots', screenshots)
-
-      if (!screenshots.length) {
-        return null;
-      }
-
-      // 判断doc中title、categories、summary、detail
-      if (!currentDoc.title) {
-        currentDoc.title = "未生成"
-      }
-      if (!currentDoc.categories) {
-        currentDoc.categories = []
-      }
-      if (!currentDoc.summary) {
-        currentDoc.summary = "未生成"
-      }
-      if (!currentDoc.detail) {
-        currentDoc.detail = "未生成"
-      }
-      currentDoc.time = roundedTimeStr
-
-      // 获取数据库中的截图
-      // 遍历screenshots 数组，获取每个截图的详细信息
-      const dbScreenshots = await Promise.all(screenshots.map(async (screenshot) => {
-        const dbData = await window.getScreenshotFromDb(screenshot._id)
-        // timestamp转时分秒
-        const time = this.formatTime(screenshot.timestamp || 0)
-        
-        return {
-          imageData:  dbData,
-          timestamp: screenshot.timestamp || 0,
-          app: screenshot.app || "uTools",
-          time: time,
-          screenshotId: screenshot._id
-        }
-      }))
-
-      console.log('roundedTime docId: dbScreenshots', dbScreenshots)
-      
-      //按照时间戳排序
-      dbScreenshots.sort((a, b) => a.timestamp - b.timestamp);
-      
-      currentDoc.screenshots = dbScreenshots;
-
-      // this.screenshots = dbScreenshots;
-      console.log('roundedTime docId: recentScreenshots', screenshots);
-      return currentDoc;
-    } catch (error) {
-      console.error('Failed to get screenshots from database:', error);
-      return this.screenshots;
-    }
-  }
-
-  // 获取截图保存目录
-  getScreenshotDir() {
-    try {
-      const settings = JSON.parse(localStorage.getItem('focusflow-settings') || '{}')
-      let dir = settings.screenshotDir || ''
-      
-      // 如果没有设置目录，使用默认目录
-      if (!dir) {
-        const homeDir = process.env.HOME || process.env.USERPROFILE
-        dir = `${homeDir}/Pictures/FocusFlow`
-      }
-      
-      return dir
-    } catch (error) {
-      console.error('Failed to get screenshot directory:', error)
-      // 返回默认目录
-      const homeDir = process.env.HOME || process.env.USERPROFILE
-      return `${homeDir}/Pictures/FocusFlow`
-    }
-  }
-
-  // 确保目录存在
-  async ensureDirectoryExists(dir) {
-    try {
-      if (typeof window.utools !== 'undefined' && typeof window.utools.fs === 'object') {
-        const fs = window.utools.fs
-        if (!fs.existsSync(dir)) {
-          fs.mkdirSync(dir, { recursive: true })
-          console.log('Created directory:', dir)
-        }
-      } else {
-        console.warn('fs API not available, cannot ensure directory exists')
-      }
-    } catch (error) {
-      console.error('Failed to ensure directory exists:', error)
-    }
-  }
-
-  // 压缩截图
-  async compressScreenshot(imageData) {
-    return new Promise((resolve) => {
-      const img = new Image()
-      img.src = imageData
-      
-      img.onload = () => {
-        const canvas = document.createElement('canvas')
-        const ctx = canvas.getContext('2d')
-        
-        // 计算压缩后的尺寸，保持 aspect ratio
-        const maxWidth = 1280
-        const maxHeight = 720
-        let width = img.width
-        let height = img.height
-        
-        if (width > maxWidth) {
-          height = height * (maxWidth / width)
-          width = maxWidth
-        }
-        
-        if (height > maxHeight) {
-          width = width * (maxHeight / height)
-          height = maxHeight
-        }
-        
-        canvas.width = width
-        canvas.height = height
-        
-        // 绘制压缩后的图像
-        ctx.drawImage(img, 0, 0, width, height)
-        
-        // 转换为base64，质量设置为0.7
-        const compressedData = canvas.toDataURL('image/jpeg', 0.7)
-        resolve(compressedData)
-      }
-    })
-  }
-
-  // 保存截图到 uTools 本地数据库
-  async saveScreenshotToDb(screenshotData) {
-    try {
-      // 压缩截图
-      const compressedImageData = await this.compressScreenshot(screenshotData.imageData)
-      screenshotData.imageData = compressedImageData
-      
-      // 使用 window.saveScreenshotToDb 保存到数据库
-      if (typeof window.saveScreenshotToDb === 'function') {
-        const screenshotId = window.saveScreenshotToDb(screenshotData)
-        if (screenshotId) {
-          console.log('Screenshot saved to database:', screenshotId)
-          return screenshotId
-        } else {
-          console.error('Failed to save screenshot to database')
-          return null
-        }
-      } else {
-        console.error('saveScreenshotToDb function not available')
-        return null
-      }
-    } catch (error) {
-      console.error('Failed to save screenshot to database:', error)
-      return null
-    }
-  }
-
-  async getMonthDataFromDb(year, month) {
-    // 获取本月数据从数据库
-    console.log('Getting month data from database')
-    try {
-      if (typeof utools !== 'undefined' && typeof utools.db !== 'undefined') {
-        
-        const currentMonth = `${year}-${month}`;
-
-        // 文档ID格式：roundedTime/currentMonth
-        const docId = `roundedTime/${currentMonth}`
-        console.log('currentMonth docId:', docId)
-        
-        // 获取当前文档
-        const currentMonthDoc = utools.db.get(docId) || {}
-        console.log('currentMonth docId: currentMonthDoc', currentMonthDoc)
-        
-        return currentMonthDoc.values || []
-      } else {
-        console.error('Database API not available')
-        return null
-      }
-    } catch (error) {
-      console.error('Failed to get month data from database:', error)
-      return null
-    }
-  }
-
-
-  async saveMonthDataToDb() {
-    // 保存本月数据到数据库
-    console.log('Saving month data to database')
-    try {
-      if (typeof utools !== 'undefined' && typeof utools.db !== 'undefined') {
-        
-        const date = new Date();
-        const year = date.getFullYear();
-        // 月份补 0（1-9 变成 01-09）
-        const month = String(date.getMonth() + 1).padStart(2, '0');
-        // 获取几号，数字格式
-        const today = date.getDate()
-        const currentMonth = `${year}-${month}`;
-
-        // 文档ID格式：roundedTime/currentMonth
-        const docId = `roundedTime/${currentMonth}`
-        console.log('currentMonth docId:', docId)
-        
-        // 获取当前文档
-        const currentMonthDoc = utools.db.get(docId) || {}
-        console.log('currentMonth docId: currentMonthDoc', currentMonthDoc)
-        
-        // 创建文档
-        const doc = {
-          _id: docId,
-          values: currentMonthDoc.values || []
-        }
-        if (currentMonthDoc._rev) {
-          doc._rev = currentMonthDoc._rev
-        }
-
-        // 如果values不包含今天日期，则添加
-        if (!doc.values.includes(today)) {
-          doc.values.push(today)
-          console.log('doc:', doc)
-
-          // 保存文档
-          const result = utools.db.put(doc)
-          if (!result.ok) {
-            console.error('Failed to save month data document:', result.message)
-            return null
-          }
-        }
-      } else {
-        console.error('Database API not available')
-        return null
-      }
-    } catch (error) {
-      console.error('Failed to save month data to database:', error)
-      return null
-    }
-  }
-
-  // 保存截图数据
-  async saveScreenshot(screenshotData) {
-    try {
-      // 添加截图到数组
-      this.screenshots.push(screenshotData)
-      
-      // 保存到 uTools 本地数据库
-      const screenshotId = await this.saveScreenshotToDb(screenshotData)
-      if (screenshotId) {
-        screenshotData.screenshotId = screenshotId
-      }
-      
-      // 保存到本地存储
-      this.saveData()
-      
-      console.log('Screenshot saved successfully')
-    } catch (error) {
-      console.error('Failed to save screenshot:', error)
-    }
-  }
-
-  // // 获取时间轴数据
-  // async getTimelineData(docKey) {
-  //   try {
-  //     console.log('Getting timeline data for docKey:', docKey);
-      
-  //     // 这里应该从数据库中获取时间轴数据
-  //     // 暂时返回模拟数据
-  //     return [
-  //       {
-  //         id: '1',
-  //         title: '上午工作时间',
-  //         time: '09:00 - 10:00',
-  //         summary: '主要使用了VS Code进行代码开发，同时使用了Chrome浏览器查阅文档。',
-  //         details: '在这个时间段内，用户主要进行了前端代码开发工作，使用VS Code编辑了多个Vue组件文件，并通过Chrome浏览器查阅了相关的技术文档和API参考。',
-  //         screenshots: []
-  //       },
-  //       {
-  //         id: '2',
-  //         title: '中午休息时间',
-  //         time: '12:00 - 13:00',
-  //         summary: '使用了Spotify听音乐，同时浏览了社交媒体。',
-  //         details: '在午休时间，用户使用Spotify播放了音乐，并通过社交媒体查看了朋友的动态，短暂休息后继续工作。',
-  //         screenshots: []
-  //       },
-  //       {
-  //         id: '3',
-  //         title: '下午会议时间',
-  //         time: '14:00 - 15:00',
-  //         summary: '参加了团队视频会议，讨论了项目进展和下一步计划。',
-  //         details: '用户参加了团队的视频会议，与团队成员讨论了当前项目的进展情况，以及下一步的开发计划和任务分配。',
-  //         screenshots: []
-  //       }
-  //     ];
-  //   } catch (error) {
-  //     console.error('Failed to get timeline data:', error);
-  //     return [];
-  //   }
-  // }
-
-  // 保存时间轴项目
-  async saveTimelineItem(item) {
-    try {
-      console.log('Saving timeline item:', item);
-      
-      // 将时间轴项目保存到数据库
-      if (typeof utools !== 'undefined' && typeof utools.db !== 'undefined') {
-        // 确保项目有ID
-        const docId = item.id || `roundedTime/${getRoundedTime()}`;
-        
-        // 创建文档
-        const doc = {
-          _id: docId,
-          title: item.title || '活动时间轴',
-          categories: item.categories || '',
-          summary: item.summary || '',
-          detail: item.detail || '',
-          screenshots: item.screenshots || []
-        };
-        
-        // 尝试获取现有文档
-        const existingDoc = utools.db.get(docId);
-        if (existingDoc) {
-          doc._rev = existingDoc._rev;
-        }
-        
-        // 保存文档
-        const result = utools.db.put(doc);
-        if (result.ok) {
-          console.log('Timeline item saved to database:', docId);
-          // 添加到内存中
-          this.timelineData.push(item);
-          return true;
-        } else {
-          console.error('Failed to save timeline item:', result.message);
-          return false;
-        }
-      } else {
-        console.error('Database API not available');
-        //  fallback to memory storage
-        this.timelineData.push(item);
-        return true;
-      }
-    } catch (error) {
-      console.error('Failed to save timeline item:', error);
-      return false;
-    }
-  }
-
-  // 生成AI汇总
-  async generateAISummary(screenshots, startTime, endTime) {
-    try {
-      console.log('Generating AI summary...');
-      
-      // 这里应该调用AI服务生成汇总
-      // 暂时返回模拟数据
-      return {
-        title: '活动汇总',
-        summary: '用户在这段时间内主要进行了工作相关活动。',
-        details: '根据截图分析，用户在这段时间内主要使用了开发工具和浏览器，进行了代码开发和文档查阅等工作。'
-      };
-    } catch (error) {
-      console.error('Failed to generate AI summary:', error);
-      return null;
-    }
-  }
-} 
+export default ActivityTracker
