@@ -344,13 +344,13 @@
         </div>
       </div>
       <div class="form-group">
-        <label for="default-category">默认分类</label>
+        <label for="default-category">默认分类（兜底）</label>
         <select
           id="default-category"
           v-model="settings.defaultCategory"
           class="form-input"
         >
-          <option value="">选择默认分类</option>
+          <option value="">不设置（推荐 · 让 AI 在不确定时输出"未分类"）</option>
           <option
             v-for="category in categories"
             :key="category.name"
@@ -359,6 +359,9 @@
             {{ category.name }}
           </option>
         </select>
+        <small class="form-help">
+          AI 仅在所有分类都难以判断时才会回退到此分类；选择「不设置」可避免 AI 把不确定的截图都归为同一类。
+        </small>
       </div>
       <button class="btn btn-primary" @click="saveCategories">保存分类设置</button>
     </div>

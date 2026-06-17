@@ -34,25 +34,26 @@ class SettingsService {
       // 截图间隔（秒），最小 5 秒，最大 600 秒
       screenshotInterval: 30,
 
-      // 分类设置
+      // 分类设置（描述更具体、避免与「工作」字面重叠；defaultCategory 留空更稳）
       categories: [
         {
           name: '个人',
           color: '#3498db',
-          description: '包含社交媒体、聊天工具、音乐、视频等个人娱乐应用'
+          description: '私人事务：私人聊天、个人理财、私人邮件、个人健康/购物、家人朋友相关内容；与工作无明确关联的截图都属于此类'
         },
         {
           name: '工作',
           color: '#2ecc71',
-          description: '包含开发工具、文档处理、邮件、项目管理等工作相关应用'
+          description: '本职工作：业务开发/编码、需求文档、工作会议、客户沟通、PR/代码评审、工单系统等；截图中可见明确的项目名/工作主题/同事昵称才算'
         },
         {
           name: '非专注',
           color: '#e74c3c',
-          description: '包含游戏、无关浏览、娱乐视频等让人分心的应用'
+          description: '与工作无关、又会消耗注意力的内容：游戏、短视频/直播、八卦新闻、电商比价、社交动态浏览等娱乐性消磨'
         }
       ],
-      defaultCategory: '工作',
+      // 默认分类留空 → 让 AI 输出 [] 而不是硬性回退（用户可在「设置 → 分类」中自行选择）
+      defaultCategory: '',
       
       // 其他设置
       language: 'zh-CN',
