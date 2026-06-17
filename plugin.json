@@ -15,6 +15,13 @@
       "cmds": [
         "focusFlow"
       ]
+    },
+    {
+      "code": "活动追踪",
+      "explain": "打开 FocusFlow 主页",
+      "cmds": [
+        "活动追踪"
+      ]
     }
   ]
 }

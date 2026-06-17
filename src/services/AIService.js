@@ -911,5 +911,315 @@ function parseAnalysisJson(text) {
   }
 }
 
+// ============================================================
+// v2 协议适配层（基于 provider 配置驱动）
+// ============================================================
+
+/**
+ * 拼接 baseURL + path（健壮处理斜杠）
+ */
+function joinUrl(base, path) {
+  if (!base) return path || ''
+  const b = String(base).replace(/\/+$/, '')
+  const p = path ? (path.startsWith('/') ? path : '/' + path) : ''
+  return b + p
+}
+
+/**
+ * OpenAI 兼容 chat completions 调用
+ * @param {Object} provider { baseURL, apiKey, model, chatPath? }
+ * @param {Array} messages
+ * @param {Object} extraBody
+ * @returns {Promise<string>} content text
+ */
+async function callOpenAICompatChat(provider, messages, extraBody = {}) {
+  const url = joinUrl(provider.baseURL, provider.chatPath || '/chat/completions')
+  const headers = { 'Content-Type': 'application/json' }
+  // 本地模型 apiKey 可为空；非空才带 Authorization
+  if (provider.apiKey) headers['Authorization'] = `Bearer ${provider.apiKey}`
+
+  let response
+  try {
+    response = await fetch(url, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        model: provider.model,
+        messages,
+        max_tokens: 1000,
+        temperature: 0.4,
+        ...extraBody
+      })
+    })
+  } catch (e) {
+    throw new Error(`网络请求失败（${provider.name || provider.id}）：${(e && e.message) || e}`)
+  }
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}))
+    const msg =
+      err.error?.message ||
+      err.base_resp?.status_msg ||
+      err.message ||
+      `HTTP ${response.status}`
+    throw new Error(`${provider.name || provider.id} API ${response.status}：${msg}`)
+  }
+  const data = await response.json()
+  return data?.choices?.[0]?.message?.content || ''
+}
+
+/**
+ * 把图片+文本组装成多模态 messages（OpenAI 兼容格式）
+ */
+function buildVisionMessages(screenshots, instructionText) {
+  const content = []
+  for (const s of screenshots) {
+    if (!s.imageData) continue
+    content.push({ type: 'image_url', image_url: { url: s.imageData } })
+  }
+  if (content.length === 0) return null
+  content.push({ type: 'text', text: instructionText })
+  return [{ role: 'user', content }]
+}
+
+/**
+ * Claude SDK 调用（图片）
+ */
+async function callClaudeVision(provider, screenshots, instructionText) {
+  const client = new Anthropic({ apiKey: provider.apiKey, dangerouslyAllowBrowser: true })
+  const content = []
+  let skipped = 0
+  for (const s of screenshots) {
+    const parsed = parseDataUrl(s.imageData)
+    if (!parsed) { skipped++; continue }
+    let mime = parsed.mime || 'image/png'
+    if (!/^image\/(jpeg|png|gif|webp)$/i.test(mime)) mime = 'image/png'
+    content.push({ type: 'image', source: { type: 'base64', media_type: mime, data: parsed.base64 } })
+  }
+  if (content.length === 0) {
+    throw new Error(`没有有效的截图可传给 Claude（${skipped} 张被跳过）`)
+  }
+  content.push({ type: 'text', text: instructionText })
+  const response = await client.messages.create({
+    model: provider.model,
+    max_tokens: 1000,
+    temperature: 0.4,
+    system: '你是一名严谨的活动分析助理，必须严格按照指定的 JSON 格式输出，不要输出 JSON 之外的任何文字。',
+    messages: [{ role: 'user', content }]
+  })
+  const text = (response?.content || []).map((c) => (c?.text || '')).join('').trim()
+  if (!text) throw new Error('Claude 返回了空内容')
+  return text
+}
+
+/**
+ * Claude SDK 调用（纯文本）
+ */
+async function callClaudeText(provider, prompt, opts = {}) {
+  const client = new Anthropic({ apiKey: provider.apiKey, dangerouslyAllowBrowser: true })
+  const response = await client.messages.create({
+    model: provider.model,
+    max_tokens: opts.maxTokens || 1500,
+    temperature: opts.temperature ?? 0.5,
+    messages: [{ role: 'user', content: [{ type: 'text', text: prompt }] }]
+  })
+  return (response?.content || []).map((c) => (c?.text || '')).join('').trim()
+}
+
+// ============================================================
+// 给 AIService 类挂载 v2 入口（用 prototype 扩展，避免大幅改动原 class）
+// ============================================================
+
+/**
+ * 用 provider 配置分析时间槽（截图 → 标题/摘要/分类）
+ */
+AIService.prototype.analyzeTimeslotByProvider = async function (provider, args) {
+  const { categories = [], defaultCategory = '', screenshots = [], timeLabel = '' } = args || {}
+  if (!provider) throw new Error('未指定 AI provider')
+  if (!provider.model) throw new Error(`${provider.name || provider.id} 未指定模型 id`)
+  if (provider.protocol !== 'openai' && provider.protocol !== 'claude') {
+    throw new Error('未知协议：' + provider.protocol)
+  }
+  // 本地模型允许 apiKey 为空；其他要求必填
+  if (provider.protocol === 'claude' && !provider.apiKey) {
+    throw new Error('Claude 需要 API Key')
+  }
+  if (!screenshots.length) throw new Error('没有可分析的截图')
+
+  const sample = pickSampleScreenshots(screenshots, 4)
+  const catLines = (categories || []).map((c) => `- ${c.name}：${c.description || ''}`).join('\n')
+  const appList = Array.from(new Set(sample.map((s) => s.app).filter(Boolean))).join('、')
+
+  const instructionText = [
+    `你是一名个人活动分析师。请基于下列截图和元数据，判断用户在时段「${timeLabel}」内做了什么，并将其归类到给定的分类中。`,
+    '',
+    `本时段涉及的应用：${appList || '未知'}`,
+    '',
+    '可用分类（请只能从中选择，可以选多个相关分类）：',
+    catLines || '（未配置分类，请使用 "未分类"）',
+    defaultCategory ? `如果难以判断，请回退到默认分类：「${defaultCategory}」` : '',
+    '',
+    '请严格按照下面的 JSON 格式输出，不要输出 JSON 之外的任何文字：',
+    '{',
+    '  "title": "10 个字以内的本时段标题",',
+    '  "summary": "30~80 字的本时段活动摘要",',
+    '  "detail": "100~200 字的详细描述，包括看到了什么、可能在做什么",',
+    '  "categories": ["分类名1", "分类名2"]',
+    '}'
+  ].filter(Boolean).join('\n')
+
+  let text = ''
+  if (provider.protocol === 'claude') {
+    text = await callClaudeVision(provider, sample, instructionText)
+  } else {
+    if (!provider.vision) {
+      // 不支持图片的模型，仍可基于元数据让它分析
+      const fallback = `（注：当前模型不支持图片，仅基于元数据分析）\n\n${instructionText}`
+      text = await callOpenAICompatChat(provider, [{ role: 'user', content: fallback }])
+    } else {
+      const messages = buildVisionMessages(sample, instructionText)
+      if (!messages) throw new Error(`没有有效的截图可传给 ${provider.name || provider.id}`)
+      text = await callOpenAICompatChat(provider, messages)
+    }
+  }
+  if (!text) throw new Error('AI 返回了空内容')
+  const parsed = parseAnalysisJson(text)
+  parsed.model = provider.model
+  return parsed
+}
+
+/**
+ * 用 provider 配置生成日报告
+ */
+AIService.prototype.generateDailyReportByProvider = async function (provider, args) {
+  const { dateStr, slots = [], stats = null, categories = [] } = args || {}
+  if (!provider) throw new Error('未指定 AI provider')
+  if (!provider.model) throw new Error(`${provider.name || provider.id} 未指定模型 id`)
+  if (!Array.isArray(slots) || slots.length === 0) {
+    throw new Error('当天没有任何已分析的时段，无法生成报告')
+  }
+
+  const slotLines = slots.map((s) => {
+    const cats = (s.categories && s.categories.length) ? `[${s.categories.join(', ')}]` : '[未分类]'
+    const title = s.title ? `「${s.title}」` : ''
+    const sum = s.summary ? ` —— ${s.summary}` : ''
+    return `- ${s.time || ''} ${cats} ${title}${sum}`.trim()
+  }).join('\n')
+
+  const catLines = (categories || []).map((c) => `- ${c.name}：${c.description || ''}`).join('\n')
+
+  const statsLine = stats
+    ? `截图 ${stats.totalScreenshots || 0} 张 · 时段 ${stats.totalSessions || 0} 个 · 活跃分类 ${stats.activeCategories || 0} 类 · 专注度 ${stats.focusScore || 0}%`
+    : ''
+
+  const prompt = [
+    `你是一名个人效率顾问。下面是用户在 ${dateStr} 这一天的所有 10 分钟时段摘要（已由 AI 分析过），请基于这些摘要生成一份当日总结报告。`,
+    '',
+    statsLine ? `今日整体统计：${statsLine}` : '',
+    '',
+    catLines ? `当前分类配置：\n${catLines}` : '',
+    '',
+    '今日时段摘要清单：',
+    slotLines,
+    '',
+    '请用 Markdown 格式输出一份精炼的中文报告，结构包含：',
+    '1. **🎯 今日概览**：1~2 句话提炼整体状态',
+    '2. **📊 时间分配**：按分类粗略归纳花了多少时段在什么上',
+    '3. **✨ 主要成果**：今天做成了哪几件事（基于时段标题/摘要归并）',
+    '4. **⚠️ 干扰与待优化**：发现了哪些非专注 / 频繁切换 / 中断的迹象',
+    '5. **💡 明日建议**：3 条可执行的小建议',
+    '',
+    '注意：',
+    '- 严格基于上面的时段摘要，不要编造没出现过的内容',
+    '- 全文 300~600 字，简洁、具体、避免空话',
+    '- 直接输出 Markdown，不要包裹在 ```代码块``` 中'
+  ].filter(Boolean).join('\n')
+
+  let content = ''
+  if (provider.protocol === 'claude') {
+    content = await callClaudeText(provider, prompt, { maxTokens: 1500 })
+  } else {
+    content = await callOpenAICompatChat(
+      provider,
+      [{ role: 'user', content: prompt }],
+      { max_tokens: 1500 }
+    )
+  }
+  content = stripCodeFence(content)
+  if (!content) throw new Error('AI 返回了空报告')
+  return { content, model: provider.model }
+}
+
+/**
+ * 测试 provider 连通性（发一条最短文本）
+ */
+AIService.prototype.pingProvider = async function (provider) {
+  if (!provider) return { ok: false, message: '未选择模型' }
+  if (!provider.model) return { ok: false, message: '未配置模型 id' }
+  if (provider.protocol === 'claude') {
+    if (!provider.apiKey) return { ok: false, message: '未配置 API Key' }
+    try {
+      const client = new Anthropic({ apiKey: provider.apiKey, dangerouslyAllowBrowser: true })
+      await client.messages.create({
+        model: provider.model,
+        max_tokens: 8,
+        messages: [{ role: 'user', content: 'ping' }]
+      })
+      return { ok: true, message: '连接成功' }
+    } catch (e) {
+      return { ok: false, message: (e && e.message) || String(e) }
+    }
+  }
+  // OpenAI 兼容
+  try {
+    await callOpenAICompatChat(
+      provider,
+      [{ role: 'user', content: 'ping' }],
+      { max_tokens: 4 }
+    )
+    return { ok: true, message: '连接成功' }
+  } catch (e) {
+    return { ok: false, message: (e && e.message) || String(e) }
+  }
+}
+
+/**
+ * 拉取 provider 的可用模型列表（OpenAI 兼容服务支持 GET /models）
+ */
+AIService.prototype.listModelsByProvider = async function (provider) {
+  if (!provider) return []
+  if (provider.protocol === 'claude') {
+    // Claude 没有公开 list models 接口，返回内置静态列表
+    return CLAUDE_MODEL_OPTIONS
+  }
+  if (!provider.baseURL) return []
+  try {
+    const url = joinUrl(provider.baseURL, '/models')
+    const headers = {}
+    if (provider.apiKey) headers['Authorization'] = `Bearer ${provider.apiKey}`
+    const resp = await fetch(url, { method: 'GET', headers })
+    if (!resp.ok) {
+      // Ollama 还有专门的 /api/tags 接口
+      if (provider.baseURL.includes('11434')) {
+        const tagUrl = provider.baseURL.replace(/\/v1\/?$/, '') + '/api/tags'
+        const r2 = await fetch(tagUrl)
+        if (r2.ok) {
+          const j2 = await r2.json()
+          return (j2?.models || []).map((m) => ({ id: m.name || m.model, label: m.name || m.model }))
+        }
+      }
+      return []
+    }
+    const data = await resp.json()
+    const arr = data?.data || data?.models || []
+    return arr.map((m) => ({
+      id: m.id || m.model || m.name,
+      label: m.id || m.model || m.name
+    })).filter((m) => m.id)
+  } catch (e) {
+    console.warn('[FocusFlow] listModelsByProvider 失败：', e)
+    return []
+  }
+}
+
 export default AIService
 export { AIService }

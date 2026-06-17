@@ -11,134 +11,257 @@
       <div class="settings-content">
       <div class="settings-section">
         <h3>
-          <span>AI 设置</span>
+          <span>AI 模型</span>
           <span :class="['ai-status-tag', aiOverallStatus.cls]">{{ aiOverallStatus.label }}</span>
         </h3>
 
-        <!-- 模型卡片选择 -->
-        <div class="form-group">
-          <label>选择 AI 模型</label>
-          <div class="model-grid">
-            <button
-              v-for="m in modelOptions"
-              :key="m.id"
-              type="button"
-              :class="['model-card', { active: settings.aiModel === m.id }]"
-              @click="selectModel(m.id)"
-            >
-              <div class="model-card-row">
-                <span class="model-name">{{ m.name }}</span>
-                <span v-if="isModelConfigured(m.id)" class="model-badge configured" title="已配置 API Key">●</span>
-                <span v-else class="model-badge unconfigured" title="未配置">○</span>
+        <!-- 当前激活的 provider 概览 -->
+        <div v-if="activeProvider" class="active-provider-card">
+          <div class="active-provider-info">
+            <span class="active-provider-label">当前使用</span>
+            <span class="active-provider-name">{{ activeProvider.name }}</span>
+            <span class="active-provider-meta">
+              <code>{{ activeProvider.model || '未指定' }}</code>
+              <span class="provider-type-tag" :class="`type-${activeProvider.type}`">
+                {{ activeProvider.type === 'preset' ? '常用' : activeProvider.type === 'local' ? '本地' : '自定义' }}
+              </span>
+              <span v-if="activeProvider.vision" class="provider-type-tag vision">视觉</span>
+            </span>
+          </div>
+        </div>
+        <div v-else class="active-provider-card empty">
+          尚未配置任何 AI 模型，请点击下方「+ 添加模型」开始配置。
+        </div>
+
+        <!-- 我的模型列表 -->
+        <div v-if="providers.length > 0" class="provider-list">
+          <div
+            v-for="p in providers"
+            :key="p.id"
+            :class="['provider-row', { active: p.id === activeProviderId }]"
+          >
+            <div class="provider-row-main" @click="activateProvider(p.id)">
+              <div class="provider-row-title">
+                <span v-if="p.id === activeProviderId" class="provider-active-dot">●</span>
+                <span class="provider-row-name">{{ p.name }}</span>
+                <span class="provider-type-tag" :class="`type-${p.type}`">
+                  {{ p.type === 'preset' ? '常用' : p.type === 'local' ? '本地' : '自定义' }}
+                </span>
+                <span v-if="p.vision" class="provider-type-tag vision">视觉</span>
               </div>
-              <div class="model-card-row">
-                <span v-if="m.vision" class="model-tag vision">视觉</span>
-                <span class="model-tag">{{ m.region }}</span>
+              <div class="provider-row-meta">
+                <code class="provider-row-model">{{ p.model || '未指定模型' }}</code>
+                <span v-if="p.protocol === 'openai' && p.baseURL" class="provider-row-url" :title="p.baseURL">
+                  {{ p.baseURL }}
+                </span>
+                <span v-if="!p.apiKey && p.protocol === 'claude'" class="provider-warn">⚠ 缺 Key</span>
               </div>
-              <p class="model-desc">{{ m.description }}</p>
+            </div>
+            <div class="provider-row-actions">
+              <button class="btn-mini" type="button" title="编辑" @click="editProvider(p)">✎</button>
+              <button class="btn-mini danger" type="button" title="删除" @click="deleteProvider(p)">🗑</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- 添加模型按钮区 -->
+        <div class="add-provider-bar">
+          <button
+            v-if="!showAddMenu && !providerForm.show"
+            class="btn btn-primary"
+            type="button"
+            @click="showAddMenu = true"
+          >
+            + 添加模型
+          </button>
+          <div v-if="showAddMenu" class="add-menu">
+            <button class="add-menu-item" type="button" @click="openAddPanel('preset')">
+              <span class="add-menu-icon">⭐</span>
+              <span class="add-menu-text">
+                <strong>常用模型</strong>
+                <small>OpenAI · Claude · Kimi · DeepSeek · 智谱 · 通义 · 豆包 · MiniMax</small>
+              </span>
+            </button>
+            <button class="add-menu-item" type="button" @click="openAddPanel('custom')">
+              <span class="add-menu-icon">⚙️</span>
+              <span class="add-menu-text">
+                <strong>自定义模型</strong>
+                <small>任意 OpenAI 兼容服务，自定义 baseURL + API Key</small>
+              </span>
+            </button>
+            <button class="add-menu-item" type="button" @click="openAddPanel('local')">
+              <span class="add-menu-icon">💻</span>
+              <span class="add-menu-text">
+                <strong>本地模型</strong>
+                <small>Ollama / LM Studio / vLLM 等本地推理服务</small>
+              </span>
+            </button>
+            <button class="btn btn-secondary btn-sm cancel-add" type="button" @click="showAddMenu = false">
+              取消
             </button>
           </div>
         </div>
 
-        <!-- 选中模型后展示 Key 配置 -->
-        <div v-if="settings.aiModel" class="ai-config-card">
-          <div class="ai-config-header">
-            <div>
-              <div class="ai-config-title">{{ currentModelMeta.name }} API Key</div>
-              <small class="ai-config-link">
-                获取入口：
-                <a :href="currentModelMeta.link" target="_blank">{{ currentModelMeta.linkLabel }}</a>
-              </small>
+        <!-- 添加/编辑表单 -->
+        <div v-if="providerForm.show" class="provider-form">
+          <div class="provider-form-header">
+            <h4>{{ providerForm.editing ? '编辑模型' : '添加模型' }}</h4>
+            <button class="close-btn" type="button" @click="closeProviderForm">×</button>
+          </div>
+
+          <!-- 常用模型预设选择 -->
+          <div v-if="providerForm.mode === 'preset'" class="form-group">
+            <label>选择服务商</label>
+            <div class="preset-grid">
+              <button
+                v-for="(meta, key) in presetCatalog"
+                :key="key"
+                type="button"
+                :class="['preset-card', { active: providerForm.presetKey === key }]"
+                @click="applyPresetTemplate(key, meta)"
+              >
+                <span class="preset-name">{{ meta.name }}</span>
+                <span class="preset-tags">
+                  <span v-if="meta.vision" class="provider-type-tag vision">视觉</span>
+                  <span v-if="meta.protocol === 'claude'" class="provider-type-tag">Claude SDK</span>
+                  <span v-else class="provider-type-tag">OpenAI 兼容</span>
+                </span>
+              </button>
             </div>
-            <span :class="['conn-pill', connStatusInfo.cls]">
-              <span class="conn-dot"></span>{{ connStatusInfo.label }}
-            </span>
           </div>
 
-          <div class="api-key-row">
+          <!-- 本地预设选择 -->
+          <div v-if="providerForm.mode === 'local' && !providerForm.editing" class="form-group">
+            <label>选择本地服务</label>
+            <div class="preset-grid">
+              <button
+                v-for="(meta, key) in localPresetCatalog"
+                :key="key"
+                type="button"
+                :class="['preset-card', { active: providerForm.presetKey === key }]"
+                @click="applyLocalTemplate(key, meta)"
+              >
+                <span class="preset-name">{{ meta.name }}</span>
+                <span class="preset-tags">
+                  <code>{{ meta.baseURL }}</code>
+                </span>
+              </button>
+            </div>
+          </div>
+
+          <!-- 表单字段 -->
+          <div class="form-group">
+            <label>名称 <span class="required">*</span></label>
             <input
-              :type="showApiKey ? 'text' : 'password'"
-              v-model="currentApiKey"
-              :placeholder="`粘贴 ${currentModelMeta.name} API Key`"
-              class="form-input api-key-input"
-              autocomplete="off"
-              spellcheck="false"
-              @input="onApiKeyInput"
+              v-model="providerForm.data.name"
+              type="text"
+              class="form-input"
+              placeholder="如：OpenAI 个人 / 公司 Ollama"
             />
-            <button class="icon-btn" type="button" :title="showApiKey ? '隐藏' : '显示'" @click="showApiKey = !showApiKey">
-              {{ showApiKey ? '🙈' : '👁' }}
-            </button>
-            <button class="icon-btn" type="button" title="从剪贴板粘贴" @click="pasteApiKey">📋</button>
-            <button
-              class="icon-btn"
-              type="button"
-              title="清除"
-              :disabled="!currentApiKey"
-              @click="clearApiKey"
-            >🗑</button>
           </div>
-          <small v-if="currentApiKey" class="form-help">
-            已输入 {{ currentApiKey.length }} 字符 · 仅在本机存储，不会上传任何服务器
-          </small>
 
-          <div class="form-group model-name-group">
-            <label for="ai-model-name">模型名称</label>
-            <div class="model-name-row">
+          <div v-if="providerForm.mode !== 'preset' || providerForm.data.protocol === 'openai'" class="form-group">
+            <label>协议</label>
+            <select v-model="providerForm.data.protocol" class="form-input" :disabled="providerForm.mode === 'preset'">
+              <option value="openai">OpenAI 兼容（chat completions）</option>
+              <option value="claude">Anthropic Claude SDK</option>
+            </select>
+          </div>
+
+          <div v-if="providerForm.data.protocol === 'openai'" class="form-group">
+            <label>Base URL <span class="required">*</span></label>
+            <input
+              v-model="providerForm.data.baseURL"
+              type="text"
+              class="form-input"
+              placeholder="https://api.example.com/v1"
+              spellcheck="false"
+            />
+            <small class="form-help">不要带尾部 /chat/completions，只填到 v1 这一级</small>
+          </div>
+
+          <div v-if="providerForm.data.protocol === 'openai' && providerForm.data.chatPath" class="form-group">
+            <label>Chat 路径（高级）</label>
+            <input
+              v-model="providerForm.data.chatPath"
+              type="text"
+              class="form-input"
+              spellcheck="false"
+            />
+            <small class="form-help">默认 /chat/completions；MiniMax 等使用自定义路径</small>
+          </div>
+
+          <div class="form-group">
+            <label>
+              API Key
+              <span v-if="providerForm.data.type !== 'local'" class="required">*</span>
+              <span v-else class="optional">（本地服务可留空）</span>
+            </label>
+            <div class="api-key-row">
               <input
-                id="ai-model-name"
-                v-model="currentModelName"
-                type="text"
-                class="form-input model-name-input"
+                :type="showApiKey ? 'text' : 'password'"
+                v-model="providerForm.data.apiKey"
+                class="form-input api-key-input"
+                placeholder="sk-..."
                 spellcheck="false"
                 autocomplete="off"
-                :placeholder="`默认：${currentModelMeta.defaultModel}`"
-                :list="`models-${settings.aiModel}`"
-                @input="onModelNameInput"
               />
-              <datalist :id="`models-${settings.aiModel}`">
-                <option v-for="m in availableModels" :key="m.id" :value="m.id">{{ m.label || m.id }}</option>
+              <button class="icon-btn" type="button" @click="showApiKey = !showApiKey">
+                {{ showApiKey ? '🙈' : '👁' }}
+              </button>
+              <button class="icon-btn" type="button" title="粘贴" @click="pasteToForm">📋</button>
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label>模型 ID <span class="required">*</span></label>
+            <div class="model-name-row">
+              <input
+                v-model="providerForm.data.model"
+                type="text"
+                class="form-input"
+                spellcheck="false"
+                placeholder="如：gpt-4o-mini / llama3.2 / claude-3-5-sonnet-20241022"
+                list="form-model-options"
+              />
+              <datalist id="form-model-options">
+                <option v-for="m in providerForm.modelOptions" :key="m.id" :value="m.id">
+                  {{ m.label || m.id }}
+                </option>
               </datalist>
               <button
                 class="btn btn-secondary btn-sm"
                 type="button"
-                :disabled="fetchingModels || !currentApiKey"
-                :title="currentApiKey ? '点击获取当前账号可用的模型列表' : '请先填写 API Key'"
-                @click="fetchAvailableModels"
+                :disabled="formFetchingModels"
+                @click="fetchFormModels"
               >
-                {{ fetchingModels ? '获取中…' : '🔄 获取模型' }}
+                {{ formFetchingModels ? '获取中…' : '🔄 拉取模型' }}
               </button>
             </div>
-            <small class="form-help">
-              默认模型：<code>{{ currentModelMeta.defaultModel }}</code>
-              <span v-if="availableModels.length > 0"> · 已加载 {{ availableModels.length }} 个可用模型</span>
-              <span v-if="currentModelName && !isCurrentModelInList" class="model-name-warn">
-                · 当前使用的是自定义名称（列表外）
-              </span>
-            </small>
+          </div>
+
+          <div class="form-group">
+            <label class="checkbox-label">
+              <input type="checkbox" v-model="providerForm.data.vision" />
+              支持图片输入（视觉模型）
+            </label>
+            <small class="form-help">勾选后用于时段截图分析；未勾选时仅基于元数据分析（不发送图片）</small>
+          </div>
+
+          <div v-if="providerForm.testResult" :class="['test-result', providerForm.testResult.ok ? 'success' : 'error']">
+            <span class="result-icon">{{ providerForm.testResult.ok ? '✓' : '✗' }}</span>
+            <span class="result-text">{{ providerForm.testResult.message }}</span>
           </div>
 
           <div class="button-group">
-            <button class="btn btn-primary" @click="saveApiKeys" :disabled="!hasUnsavedChange">
-              {{ hasUnsavedChange ? '保存' : '已保存' }}
+            <button class="btn btn-primary" type="button" @click="saveProviderForm">
+              {{ providerForm.editing ? '保存修改' : '添加并使用' }}
             </button>
-            <button
-              class="btn btn-secondary"
-              @click="testConnection"
-              :disabled="testing || !currentApiKey"
-            >
-              {{ testing ? '测试中…' : '测试连接' }}
+            <button class="btn btn-secondary" type="button" :disabled="formTesting" @click="testProviderForm">
+              {{ formTesting ? '测试中…' : '测试连接' }}
             </button>
+            <button class="btn btn-secondary" type="button" @click="closeProviderForm">取消</button>
           </div>
-
-          <div v-if="testResult" :class="['test-result', testResult.success ? 'success' : 'error']">
-            <span class="result-icon">{{ testResult.success ? '✓' : '✗' }}</span>
-            <span class="result-text">{{ testResult.message }}</span>
-            <button class="result-close" type="button" @click="testResult = null">×</button>
-          </div>
-        </div>
-
-        <div v-else class="ai-empty-tip">
-          请先选择一个 AI 模型，再配置对应的 API Key
         </div>
       </div>
 
@@ -349,163 +472,225 @@
 <script setup>
 import { ref, reactive, onMounted, computed } from 'vue'
 import { AIService } from '../services/AIService'
-import settingsService from '../services/Settings'
+import settingsService, { SettingsService } from '../services/Settings'
 
 const emit = defineEmits(['close', 'settings-updated'])
 
 const aiService = new AIService()
 
-const currentApiKey = ref('')
-const categories = ref([])
-const testing = ref(false)
-const testResult = ref(null)
-// 新增：UI 优化状态
+// ========== v2: AI Provider 管理 ==========
 const showApiKey = ref(false)
-const savedApiKey = ref('') // 用于检测「未保存修改」状态
+const providers = ref([])
+const activeProviderId = ref('')
 
-// 模型名称相关
-const currentModelName = ref('')
-const savedModelName = ref('')
-const availableModels = ref([]) // 列表来自 aiService.listModels
-const fetchingModels = ref(false)
+// 当前激活的 provider（计算属性）
+const activeProvider = computed(() =>
+  providers.value.find((p) => p.id === activeProviderId.value) || null
+)
 
-// AI 模型元数据（卡片展示用）
-const modelOptions = [
-  {
-    id: 'claude',
-    name: 'Claude',
-    description: 'Anthropic 的 Claude 3.5 Sonnet，视觉能力极强',
-    vision: true,
-    region: '海外',
-    link: 'https://console.anthropic.com/',
-    linkLabel: 'Anthropic Console',
-    defaultModel: 'claude-3-5-sonnet-20241022'
-  },
-  {
-    id: 'minimax',
-    name: 'MiniMax',
-    description: '国产多模态大模型，截图分析效果不错',
-    vision: true,
-    region: '国内',
-    link: 'https://www.minimaxi.com/',
-    linkLabel: 'MiniMax Console',
-    defaultModel: 'MiniMax-M2.7'
-  },
-  {
-    id: 'kimi',
-    name: 'Kimi',
-    description: 'Moonshot 出品，国内访问稳定，支持视觉',
-    vision: true,
-    region: '国内',
-    link: 'https://platform.moonshot.cn/',
-    linkLabel: 'Moonshot Console',
-    defaultModel: 'moonshot-v1-32k-vision-preview'
-  }
-]
-
-// 当前选中模型的元数据
-const currentModelMeta = computed(() => {
-  return modelOptions.find((m) => m.id === settings.aiModel) || {
-    name: '',
-    description: '',
-    vision: false,
-    region: '',
-    link: '',
-    linkLabel: '',
-    defaultModel: ''
-  }
-})
-
-// 总体 AI 配置状态徽标
+// 整体状态徽标
 const aiOverallStatus = computed(() => {
-  if (!settings.aiModel) return { label: '未配置', cls: 'tag-warn' }
-  const all = settingsService.loadSettings()
-  const k = all.apiKeys?.[settings.aiModel]
-  if (!k) return { label: '缺少 API Key', cls: 'tag-warn' }
-  return { label: '已配置', cls: 'tag-ok' }
+  if (providers.value.length === 0) return { label: '未配置', cls: 'tag-warn' }
+  if (!activeProviderId.value) return { label: '未激活', cls: 'tag-warn' }
+  const p = activeProvider.value
+  if (!p) return { label: '配置异常', cls: 'tag-warn' }
+  if (p.protocol === 'claude' && !p.apiKey) return { label: '缺少 Key', cls: 'tag-warn' }
+  if (!p.model) return { label: '未指定模型', cls: 'tag-warn' }
+  return { label: '已就绪', cls: 'tag-ok' }
 })
 
-// 单个模型是否已配置 API Key
-function isModelConfigured(id) {
-  try {
-    const all = settingsService.loadSettings()
-    return !!(all.apiKeys && all.apiKeys[id])
-  } catch (e) {
-    return false
+// 添加菜单
+const showAddMenu = ref(false)
+
+// 表单状态
+const presetCatalog = SettingsService.PRESETS || {}
+const localPresetCatalog = SettingsService.LOCAL_PRESETS || {}
+
+const providerForm = reactive({
+  show: false,
+  editing: false,
+  mode: 'preset', // 'preset' | 'custom' | 'local'
+  presetKey: '',
+  data: makeEmptyProviderData(),
+  modelOptions: [],
+  testResult: null
+})
+const formTesting = ref(false)
+const formFetchingModels = ref(false)
+
+function makeEmptyProviderData(overrides = {}) {
+  return {
+    id: '',
+    name: '',
+    type: 'custom',
+    protocol: 'openai',
+    baseURL: '',
+    chatPath: '',
+    apiKey: '',
+    model: '',
+    vision: false,
+    builtin: false,
+    ...overrides
   }
 }
 
-// 是否存在未保存的修改
-const hasUnsavedChange = computed(() => {
-  return currentApiKey.value !== savedApiKey.value || currentModelName.value !== savedModelName.value
-})
-
-// 当前填写的模型名是否在已获取的列表里（用于 UI 提示）
-const isCurrentModelInList = computed(() => {
-  if (!currentModelName.value) return true
-  return availableModels.value.some((m) => m.id === currentModelName.value)
-})
-
-// 当前模型的连接状态（基于本会话的测试结果 + 是否已保存）
-const connStatusInfo = computed(() => {
-  if (!currentApiKey.value) return { label: '未填写', cls: 'pill-gray' }
-  if (testResult.value && testResult.value.success) return { label: '连接正常', cls: 'pill-ok' }
-  if (testResult.value && !testResult.value.success) return { label: '连接异常', cls: 'pill-err' }
-  if (hasUnsavedChange.value) return { label: '未保存', cls: 'pill-warn' }
-  return { label: '已保存', cls: 'pill-info' }
-})
-
-// 选择模型时同步当前 API Key
-function selectModel(id) {
-  if (settings.aiModel === id) return
-  // 切模型若有未保存内容，提示
-  if (hasUnsavedChange.value && (currentApiKey.value || currentModelName.value)) {
-    if (!window.confirm(`切换模型会丢失尚未保存的 ${currentModelMeta.value.name || '当前'} API Key / 模型名修改，确定继续？`)) {
-      return
-    }
-  }
-  settings.aiModel = id
-  testResult.value = null
-  showApiKey.value = false
-  const apiKey = settingsService.loadApiKey(id) || ''
-  currentApiKey.value = apiKey
-  savedApiKey.value = apiKey
-  const modelName = settingsService.loadAiModelName(id) || ''
-  currentModelName.value = modelName
-  savedModelName.value = modelName
-  // 切换 provider 时清空已获取的模型列表（避免跨 provider 残留）
-  availableModels.value = []
+function loadProvidersFromStore() {
+  providers.value = settingsService.loadProviders() || []
+  const settingsAll = settingsService.loadSettings()
+  activeProviderId.value = settingsAll.activeProviderId || ''
 }
 
-function onApiKeyInput() {
-  // 一旦修改 → 清掉上一次的测试结果
-  testResult.value = null
+function activateProvider(id) {
+  if (!id || activeProviderId.value === id) return
+  activeProviderId.value = id
+  settingsService.setActiveProvider(id)
+  emit('settings-updated', { __settingsSaved: true })
+  utools?.showNotification?.('已切换激活模型')
 }
 
-function onModelNameInput() {
-  // 模型名变化时清掉上一次的测试结果（避免「测试时用的旧模型」误导）
-  testResult.value = null
+function openAddPanel(mode) {
+  showAddMenu.value = false
+  providerForm.show = true
+  providerForm.editing = false
+  providerForm.mode = mode
+  providerForm.presetKey = ''
+  providerForm.modelOptions = []
+  providerForm.testResult = null
+  providerForm.data = makeEmptyProviderData({
+    type: mode === 'preset' ? 'preset' : mode === 'local' ? 'local' : 'custom',
+    protocol: 'openai'
+  })
 }
 
-async function pasteApiKey() {
+function closeProviderForm() {
+  providerForm.show = false
+  providerForm.testResult = null
+}
+
+function applyPresetTemplate(key, meta) {
+  providerForm.presetKey = key
+  providerForm.data = makeEmptyProviderData({
+    id: providerForm.editing ? providerForm.data.id : `${meta.id}-${Date.now().toString(36).slice(-4)}`,
+    name: meta.name,
+    type: 'preset',
+    protocol: meta.protocol,
+    baseURL: meta.baseURL || '',
+    chatPath: meta.chatPath || '',
+    apiKey: providerForm.data.apiKey, // 保留用户已输入
+    model: meta.defaultModel || '',
+    vision: !!meta.vision,
+    builtin: true
+  })
+  providerForm.modelOptions = (meta.models || []).map((m) => ({ id: m, label: m }))
+}
+
+function applyLocalTemplate(key, meta) {
+  providerForm.presetKey = key
+  providerForm.data = makeEmptyProviderData({
+    id: providerForm.editing ? providerForm.data.id : `${meta.id}-${Date.now().toString(36).slice(-4)}`,
+    name: meta.name,
+    type: 'local',
+    protocol: meta.protocol,
+    baseURL: meta.baseURL || '',
+    chatPath: meta.chatPath || '',
+    apiKey: providerForm.data.apiKey,
+    model: meta.defaultModel || '',
+    vision: !!meta.vision,
+    builtin: true
+  })
+  providerForm.modelOptions = (meta.models || []).map((m) => ({ id: m, label: m }))
+}
+
+function editProvider(p) {
+  showAddMenu.value = false
+  providerForm.show = true
+  providerForm.editing = true
+  providerForm.mode = p.type
+  providerForm.presetKey = ''
+  providerForm.modelOptions = []
+  providerForm.testResult = null
+  providerForm.data = { ...makeEmptyProviderData(), ...p }
+}
+
+function deleteProvider(p) {
+  if (!window.confirm(`确定删除「${p.name || p.id}」？`)) return
+  settingsService.removeProvider(p.id)
+  loadProvidersFromStore()
+  emit('settings-updated', { __settingsSaved: true })
+  utools?.showNotification?.('已删除')
+}
+
+async function pasteToForm() {
   try {
     const text = await navigator.clipboard.readText()
-    if (text) {
-      currentApiKey.value = text.trim()
-      onApiKeyInput()
-    } else {
-      utools?.showNotification?.('剪贴板为空')
-    }
+    if (text) providerForm.data.apiKey = text.trim()
   } catch (e) {
-    utools?.showNotification?.('无法读取剪贴板，请手动粘贴')
+    utools?.showNotification?.('无法读取剪贴板')
   }
 }
 
-function clearApiKey() {
-  if (!currentApiKey.value) return
-  if (!window.confirm('确定清除当前 API Key 输入？（保存后才会真正生效）')) return
-  currentApiKey.value = ''
-  testResult.value = null
+function validateProviderForm() {
+  const d = providerForm.data
+  if (!d.name || !d.name.trim()) return '请填写名称'
+  if (!d.protocol) return '请选择协议'
+  if (d.protocol === 'openai' && !d.baseURL) return '请填写 Base URL'
+  if (!d.model) return '请填写模型 ID'
+  if (d.type !== 'local' && !d.apiKey) {
+    return d.protocol === 'claude' ? 'Claude 需要 API Key' : '请填写 API Key（本地服务可改类型为「本地」）'
+  }
+  return ''
+}
+
+async function testProviderForm() {
+  providerForm.testResult = null
+  const err = validateProviderForm()
+  if (err) {
+    providerForm.testResult = { ok: false, message: err }
+    return
+  }
+  formTesting.value = true
+  try {
+    const res = await aiService.pingProvider(providerForm.data)
+    providerForm.testResult = res
+  } catch (e) {
+    providerForm.testResult = { ok: false, message: (e && e.message) || String(e) }
+  } finally {
+    formTesting.value = false
+  }
+}
+
+async function fetchFormModels() {
+  formFetchingModels.value = true
+  try {
+    const list = await aiService.listModelsByProvider(providerForm.data)
+    providerForm.modelOptions = list
+    providerForm.testResult = { ok: true, message: `已获取 ${list.length} 个可用模型` }
+  } catch (e) {
+    providerForm.testResult = { ok: false, message: '获取失败：' + ((e && e.message) || e) }
+  } finally {
+    formFetchingModels.value = false
+  }
+}
+
+function saveProviderForm() {
+  const err = validateProviderForm()
+  if (err) {
+    providerForm.testResult = { ok: false, message: err }
+    return
+  }
+  const d = { ...providerForm.data }
+  if (!d.id) d.id = `provider-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`
+  // 删除空 chatPath
+  if (!d.chatPath) delete d.chatPath
+  settingsService.upsertProvider(d)
+  // 没有激活时自动激活；编辑时保持激活
+  const all = settingsService.loadSettings()
+  if (!all.activeProviderId) settingsService.setActiveProvider(d.id)
+
+  loadProvidersFromStore()
+  closeProviderForm()
+  emit('settings-updated', { __settingsSaved: true })
+  utools?.showNotification?.(providerForm.editing ? '已保存修改' : '已添加并设为激活')
 }
 
 const settings = reactive({
@@ -515,6 +700,8 @@ const settings = reactive({
   defaultCategory: '',
   aiModel: ''
 })
+
+const categories = ref([])
 
 // 加载分类设置
 const loadCategories = () => {
@@ -551,124 +738,14 @@ const loadSettings = () => {
     'autoStart',
     'notifications',
     'screenshotInterval',
-    'defaultCategory',
-    'aiModel'
+    'defaultCategory'
   ]
   ownKeys.forEach((k) => {
     if (allSettings[k] !== undefined) settings[k] = allSettings[k]
   })
 
-  if (allSettings.aiModel && allSettings.apiKeys) {
-    currentApiKey.value = allSettings.apiKeys[allSettings.aiModel] || ''
-    savedApiKey.value = currentApiKey.value
-  } else {
-    currentApiKey.value = ''
-    savedApiKey.value = ''
-  }
-  // 加载当前 provider 的自定义模型名
-  if (allSettings.aiModel) {
-    const name = (allSettings.aiModelNames && allSettings.aiModelNames[allSettings.aiModel]) || ''
-    currentModelName.value = name
-    savedModelName.value = name
-  } else {
-    currentModelName.value = ''
-    savedModelName.value = ''
-  }
-}
-
-const saveApiKeys = () => {
-  console.log('saveApiKeys called, settings:', settings)
-  if (!settings.aiModel) {
-    if (typeof utools !== 'undefined' && typeof utools.showNotification === 'function') {
-      utools.showNotification('请先选择 AI 模型')
-    }
-    return
-  }
-
-  const success = settingsService.saveApiKey(settings.aiModel, currentApiKey.value)
-  if (!success) {
-    if (typeof utools !== 'undefined' && typeof utools.showNotification === 'function') {
-      utools.showNotification('保存 API Key 失败')
-    }
-    return
-  }
-
-  // 同步保存当前 provider 的模型名（允许空 —— 退回默认）
-  settingsService.saveAiModelName(settings.aiModel, currentModelName.value || '')
-
-  // 同步「已保存」基线
-  savedApiKey.value = currentApiKey.value
-  savedModelName.value = currentModelName.value
-  emit('settings-updated', { ...settings, __settingsSaved: true })
-  if (typeof utools !== 'undefined' && typeof utools.showNotification === 'function') {
-    utools.showNotification('设置已保存')
-  }
-}
-
-const testConnection = async () => {
-  if (!settings.aiModel || !currentApiKey.value) {
-    testResult.value = { success: false, message: '请选择模型并输入 API Key' }
-    return
-  }
-
-  testing.value = true
-  testResult.value = null
-  console.log('testConnection called, settings:', settings)
-  try {
-    const res = await aiService.pingModel(settings.aiModel, currentApiKey.value)
-    if (res.ok) {
-      testResult.value = {
-        success: true,
-        message: `连接成功（已用 ${res.model} 验证）`
-      }
-    } else {
-      testResult.value = {
-        success: false,
-        message: res.message || '连接失败，请检查 API Key'
-      }
-    }
-  } catch (error) {
-    testResult.value = {
-      success: false,
-      message: error.message || '连接失败'
-    }
-  }
-
-  testing.value = false
-}
-
-/**
- * 通过 provider 的 /models 端点（或内置列表）拉取可用模型
- * 结果会作为 datalist 提供给模型名称输入框
- */
-async function fetchAvailableModels() {
-  if (!settings.aiModel) {
-    testResult.value = { success: false, message: '请先选择模型' }
-    return
-  }
-  if (!currentApiKey.value) {
-    testResult.value = { success: false, message: '请先填写 API Key' }
-    return
-  }
-  fetchingModels.value = true
-  console.log('fetchAvailableModels:', settings.aiModel)
-  try {
-    const list = await aiService.listModels(settings.aiModel, currentApiKey.value)
-    availableModels.value = list
-    testResult.value = {
-      success: true,
-      message: `已获取 ${list.length} 个可用模型`
-    }
-  } catch (e) {
-    console.error('fetchAvailableModels 失败：', e)
-    availableModels.value = []
-    testResult.value = {
-      success: false,
-      message: '获取模型列表失败：' + ((e && e.message) || String(e || '未知错误'))
-    }
-  } finally {
-    fetchingModels.value = false
-  }
+  // 加载 providers（含旧字段一次性迁移）
+  loadProvidersFromStore()
 }
 
 const saveSettingsHandler = () => {
@@ -1602,4 +1679,285 @@ onMounted(() => {
 }
 .clear-result.ok { background: #e8f8f0; color: #27ae60; border: 1px solid #abebc6; }
 .clear-result.err { background: #fdecea; color: #c0392b; border: 1px solid #f5b7b1; }
+
+/* ========== AI 模型 v2 UI ========== */
+.active-provider-card {
+  background: linear-gradient(90deg, #ebf5fb 0%, #f8fbfd 100%);
+  border: 1px solid #d6eaf8;
+  border-radius: 8px;
+  padding: 12px 14px;
+  margin-bottom: 12px;
+}
+.active-provider-card.empty {
+  background: #f8f9fa;
+  border-style: dashed;
+  color: #7f8c8d;
+  font-size: 13px;
+}
+.active-provider-info {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.active-provider-label {
+  font-size: 12px;
+  color: #7f8c8d;
+}
+.active-provider-name {
+  font-size: 16px;
+  font-weight: 600;
+  color: #2c3e50;
+}
+.active-provider-meta {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.active-provider-meta code {
+  background: white;
+  border: 1px solid #ecf0f1;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  color: #2c3e50;
+}
+
+.provider-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+.provider-row {
+  display: flex;
+  align-items: stretch;
+  border: 1px solid #e1e5e9;
+  border-radius: 6px;
+  background: white;
+  overflow: hidden;
+  transition: all 0.15s;
+}
+.provider-row:hover { border-color: #3498db; }
+.provider-row.active { border-color: #3498db; box-shadow: 0 0 0 1px #3498db inset; }
+.provider-row-main {
+  flex: 1;
+  padding: 10px 12px;
+  cursor: pointer;
+  min-width: 0;
+}
+.provider-row-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 4px;
+}
+.provider-active-dot { color: #27ae60; font-size: 10px; }
+.provider-row-name { font-size: 14px; font-weight: 600; color: #2c3e50; }
+.provider-row-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: #7f8c8d;
+  flex-wrap: wrap;
+}
+.provider-row-model {
+  background: #f4f6f8;
+  padding: 1px 6px;
+  border-radius: 4px;
+  color: #2c3e50;
+}
+.provider-row-url {
+  font-family: ui-monospace, Menlo, monospace;
+  font-size: 11px;
+  color: #95a5a6;
+  max-width: 280px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.provider-warn { color: #e67e22; font-weight: 500; }
+.provider-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 8px;
+  border-left: 1px solid #f1f3f5;
+}
+.btn-mini {
+  width: 28px;
+  height: 28px;
+  border: none;
+  background: transparent;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 14px;
+  color: #7f8c8d;
+}
+.btn-mini:hover { background: #f1f3f5; color: #2c3e50; }
+.btn-mini.danger:hover { background: #fdecea; color: #c0392b; }
+
+.provider-type-tag {
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: #ecf0f1;
+  color: #7f8c8d;
+}
+.provider-type-tag.type-preset { background: #d6eaf8; color: #2980b9; }
+.provider-type-tag.type-local { background: #d5f5e3; color: #229954; }
+.provider-type-tag.type-custom { background: #fcf3cf; color: #b7950b; }
+.provider-type-tag.vision { background: #f4ecf7; color: #8e44ad; }
+
+.add-provider-bar { margin: 8px 0; }
+.add-menu {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid #e1e5e9;
+  border-radius: 8px;
+  background: #fafbfc;
+}
+.add-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1px solid #e1e5e9;
+  border-radius: 6px;
+  background: white;
+  cursor: pointer;
+  text-align: left;
+  transition: all 0.15s;
+}
+.add-menu-item:hover {
+  border-color: #3498db;
+  background: #f8fbfd;
+  transform: translateY(-1px);
+  box-shadow: 0 2px 6px rgba(52, 152, 219, 0.1);
+}
+.add-menu-icon { font-size: 24px; flex-shrink: 0; }
+.add-menu-text { display: flex; flex-direction: column; gap: 2px; }
+.add-menu-text strong { font-size: 14px; color: #2c3e50; }
+.add-menu-text small { font-size: 12px; color: #7f8c8d; }
+.cancel-add { align-self: flex-end; }
+
+.provider-form {
+  margin-top: 12px;
+  padding: 16px;
+  border: 1px solid #d6eaf8;
+  border-radius: 8px;
+  background: #f8fbfd;
+}
+.provider-form-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+}
+.provider-form-header h4 { margin: 0; color: #2c3e50; font-size: 14px; }
+.provider-form .close-btn {
+  width: 24px;
+  height: 24px;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  font-size: 18px;
+  color: #95a5a6;
+  border-radius: 4px;
+}
+.provider-form .close-btn:hover { background: #ecf0f1; }
+
+.preset-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 8px;
+}
+.preset-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px;
+  border: 1px solid #e1e5e9;
+  border-radius: 6px;
+  background: white;
+  cursor: pointer;
+  text-align: left;
+  transition: all 0.15s;
+}
+.preset-card:hover { border-color: #3498db; background: #f8fbfd; }
+.preset-card.active {
+  border-color: #3498db;
+  background: #ebf5fb;
+  box-shadow: 0 0 0 1px #3498db inset;
+}
+.preset-name { font-size: 13px; font-weight: 600; color: #2c3e50; }
+.preset-tags {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+.preset-tags code {
+  font-size: 11px;
+  background: #f4f6f8;
+  padding: 1px 6px;
+  border-radius: 3px;
+  color: #7f8c8d;
+}
+.required { color: #e74c3c; }
+.optional { color: #7f8c8d; font-size: 12px; font-weight: normal; }
+
+.api-key-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.api-key-input { flex: 1; }
+.icon-btn {
+  width: 34px;
+  height: 34px;
+  border: 1px solid #d0d7de;
+  background: white;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 14px;
+}
+.icon-btn:hover { background: #f1f3f5; }
+.icon-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.model-name-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.model-name-row .form-input { flex: 1; }
+
+.test-result {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: 6px;
+  margin: 12px 0 0;
+  font-size: 13px;
+}
+.test-result.success { background: #e8f8f0; color: #27ae60; border: 1px solid #abebc6; }
+.test-result.error { background: #fdecea; color: #c0392b; border: 1px solid #f5b7b1; }
+.test-result .result-icon { font-size: 16px; flex-shrink: 0; }
+.test-result .result-text { flex: 1; }
+
+.ai-status-tag {
+  margin-left: 8px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 500;
+}
+.ai-status-tag.tag-ok { background: #d5f5e3; color: #229954; }
+.ai-status-tag.tag-warn { background: #fff3cd; color: #b8860b; }
 </style>

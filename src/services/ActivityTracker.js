@@ -279,13 +279,17 @@ export class ActivityTracker {
 
     try {
       const settings = settingsService.loadSettings()
-      const model = settings.aiModel || ''
-      const apiKey = (settings.apiKeys && settings.apiKeys[model]) || ''
-      if (!model) {
-        throw new Error('未选择 AI 模型，请前往「设置 → AI 设置」选择模型')
+      // 触发一次 providers 加载（含旧字段迁移）
+      settingsService.loadProviders()
+      const provider = settingsService.loadActiveProvider()
+      if (!provider) {
+        throw new Error('未配置 AI 模型，请前往「设置 → AI 模型」添加并激活一个模型')
       }
-      if (!apiKey) {
-        throw new Error(`未配置 ${model} 的 API Key，请前往「设置 → AI 设置」填写`)
+      if (provider.protocol === 'claude' && !provider.apiKey) {
+        throw new Error(`「${provider.name || provider.id}」未填写 API Key`)
+      }
+      if (!provider.model) {
+        throw new Error(`「${provider.name || provider.id}」未指定模型 id`)
       }
 
       const slot = window.getTimelineSlot ? window.getTimelineSlot(roundedSec) : null
@@ -337,18 +341,14 @@ export class ActivityTracker {
 
       let result
       try {
-        const modelName = (settings.aiModelNames && settings.aiModelNames[model]) || ''
-        result = await this.aiService.analyzeTimeslot({
-          model,
-          modelName,
-          apiKey,
+        result = await this.aiService.analyzeTimeslotByProvider(provider, {
           categories,
           defaultCategory: settings.defaultCategory || '',
           screenshots,
           timeLabel
         })
       } catch (e) {
-        console.error('[FocusFlow] aiService.analyzeTimeslot 抛出异常:', e)
+        console.error('[FocusFlow] analyzeTimeslotByProvider 抛出异常:', e)
         throw new Error(`AI 调用失败：${(e && e.message) || e}`)
       }
 
@@ -584,12 +584,19 @@ export class ActivityTracker {
       }
     }
 
-    // 2. AI 配置校验
+    // 2. AI 配置校验（v2: 用 active provider）
     const settings = settingsService.loadSettings()
-    const model = settings.aiModel || ''
-    const apiKey = (settings.apiKeys && settings.apiKeys[model]) || ''
-    if (!model) throw new Error('未选择 AI 模型，请前往「设置 → AI 设置」选择模型')
-    if (!apiKey) throw new Error(`未配置 ${model} 的 API Key，请前往「设置 → AI 设置」填写`)
+    settingsService.loadProviders() // 触发迁移
+    const provider = settingsService.loadActiveProvider()
+    if (!provider) {
+      throw new Error('未配置 AI 模型，请前往「设置 → AI 模型」添加并激活一个模型')
+    }
+    if (provider.protocol === 'claude' && !provider.apiKey) {
+      throw new Error(`「${provider.name || provider.id}」未填写 API Key`)
+    }
+    if (!provider.model) {
+      throw new Error(`「${provider.name || provider.id}」未指定模型 id`)
+    }
 
     // 3. 收集当天所有时段
     const allSlots = await this.loadTimelineForDate(dateStr)
@@ -605,36 +612,32 @@ export class ActivityTracker {
       categories: Array.isArray(s.categories) ? s.categories : []
     }))
 
-    const modelName = (settings.aiModelNames && settings.aiModelNames[model]) || ''
     const categories = Array.isArray(settings.categories) ? settings.categories : []
 
     console.log('[FocusFlow] generateDailyReport：', {
       dateStr,
-      model,
-      modelName,
+      provider: provider.id,
+      model: provider.model,
       slotCount: slimSlots.length,
       force: !!opts.force
     })
 
     let result
     try {
-      result = await this.aiService.generateDailyReport({
-        model,
-        modelName,
-        apiKey,
+      result = await this.aiService.generateDailyReportByProvider(provider, {
         dateStr,
         slots: slimSlots,
         stats: opts.stats || null,
         categories
       })
     } catch (e) {
-      console.error('[FocusFlow] aiService.generateDailyReport 抛出异常:', e)
+      console.error('[FocusFlow] generateDailyReportByProvider 抛出异常:', e)
       throw new Error(`AI 调用失败：${(e && e.message) || e}`)
     }
 
     const payload = {
       content: result.content,
-      model: result.model || model,
+      model: result.model || provider.model,
       generatedAt: Date.now(),
       slotCount: slimSlots.length,
       stats: opts.stats || null

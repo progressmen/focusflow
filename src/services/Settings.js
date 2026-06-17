@@ -6,20 +6,28 @@
 class SettingsService {
   constructor() {
     this.defaultSettings = {
-      // AI 设置
-      apiKeys: {
-        claude: '',
-        minimax: '',
-        kimi: ''
-      },
+      // ========== AI 设置（v2 数据模型） ==========
+      // providers: 用户已配置的所有模型/服务商，每项形如：
+      //   {
+      //     id: 'claude-default',          // 全局唯一 id（自动生成或迁移生成）
+      //     name: 'Claude (Anthropic)',    // 显示名
+      //     type: 'preset' | 'custom' | 'local',  // 来源类型
+      //     protocol: 'claude' | 'openai',  // 协议类型（claude SDK / OpenAI 兼容）
+      //     baseURL: 'https://api.openai.com/v1',  // OpenAI 协议必填；claude 协议忽略
+      //     apiKey: '',
+      //     model: 'gpt-4o-mini',          // 模型 id
+      //     vision: true,                  // 是否支持图片输入
+      //     builtin: false                  // 是否是内置预设（用于 UI 区分）
+      //   }
+      providers: [],
+      // 当前激活的 provider id
+      activeProviderId: '',
+
+      // ====== 旧字段（保留以兼容历史数据，加载时会迁移到 providers）======
+      apiKeys: {},
       aiModel: '',
-      // 每个 provider 用户自定义的模型名（为空则使用 AIService 中的内置默认值）
-      aiModelNames: {
-        claude: '',
-        minimax: '',
-        kimi: ''
-      },
-      
+      aiModelNames: {},
+
       // 追踪设置
       autoStart: false,
       notifications: true,
@@ -385,6 +393,116 @@ class SettingsService {
     return this.saveSettings(settings)
   }
 
+  // ========== Providers CRUD（v2 数据模型） ==========
+
+  /**
+   * 加载所有 providers（自动从旧 apiKeys/aiModelNames 迁移一次）
+   * @returns {Array} providers 数组
+   */
+  loadProviders() {
+    const settings = this.loadSettings()
+    let list = Array.isArray(settings.providers) ? settings.providers.slice() : []
+
+    // 迁移：旧版 apiKeys.claude/minimax/kimi 自动生成 preset providers（仅在 providers 空且旧字段非空时）
+    if (list.length === 0 && settings.apiKeys && typeof settings.apiKeys === 'object') {
+      const legacyMap = [
+        { key: 'claude', meta: this._presetMeta('claude') },
+        { key: 'minimax', meta: this._presetMeta('minimax') },
+        { key: 'kimi', meta: this._presetMeta('kimi') }
+      ]
+      for (const { key, meta } of legacyMap) {
+        const ak = settings.apiKeys[key]
+        if (ak && meta) {
+          list.push({
+            id: meta.id,
+            name: meta.name,
+            type: 'preset',
+            protocol: meta.protocol,
+            baseURL: meta.baseURL,
+            apiKey: ak,
+            model: (settings.aiModelNames && settings.aiModelNames[key]) || meta.defaultModel,
+            vision: meta.vision,
+            builtin: true
+          })
+        }
+      }
+      // 一次性回写
+      if (list.length > 0) {
+        settings.providers = list
+        if (!settings.activeProviderId && settings.aiModel) {
+          // aiModel 之前是 'claude'/'minimax'/'kimi'
+          const preset = legacyMap.find((m) => m.key === settings.aiModel)
+          if (preset && preset.meta) settings.activeProviderId = preset.meta.id
+        }
+        this.saveSettings(settings)
+      }
+    }
+    return list
+  }
+
+  /**
+   * 内置预设元数据（仅用于迁移与 UI 提示推荐）
+   */
+  _presetMeta(presetId) {
+    const PRESETS = SettingsService.PRESETS || {}
+    return PRESETS[presetId] || null
+  }
+
+  /**
+   * 保存全部 providers（替换式）
+   */
+  saveProviders(providers) {
+    const settings = this.loadSettings()
+    settings.providers = Array.isArray(providers) ? providers : []
+    return this.saveSettings(settings)
+  }
+
+  /**
+   * 单条新增/更新 provider
+   */
+  upsertProvider(provider) {
+    if (!provider || !provider.id) return false
+    const settings = this.loadSettings()
+    const list = Array.isArray(settings.providers) ? settings.providers.slice() : []
+    const idx = list.findIndex((p) => p.id === provider.id)
+    if (idx >= 0) list[idx] = { ...list[idx], ...provider }
+    else list.push({ ...provider })
+    settings.providers = list
+    return this.saveSettings(settings)
+  }
+
+  /**
+   * 删除 provider
+   */
+  removeProvider(providerId) {
+    const settings = this.loadSettings()
+    const list = Array.isArray(settings.providers) ? settings.providers : []
+    settings.providers = list.filter((p) => p.id !== providerId)
+    if (settings.activeProviderId === providerId) {
+      settings.activeProviderId = settings.providers[0]?.id || ''
+    }
+    return this.saveSettings(settings)
+  }
+
+  /**
+   * 获取当前激活的 provider 完整配置
+   */
+  loadActiveProvider() {
+    const settings = this.loadSettings()
+    const list = this.loadProviders()
+    const id = settings.activeProviderId || ''
+    return list.find((p) => p.id === id) || null
+  }
+
+  /**
+   * 设置激活的 provider id
+   */
+  setActiveProvider(providerId) {
+    const settings = this.loadSettings()
+    settings.activeProviderId = providerId || ''
+    return this.saveSettings(settings)
+  }
+
   /**
    * 加载追踪设置
    * @returns {Object} 追踪设置
@@ -418,6 +536,145 @@ class SettingsService {
 
 }
 
+/**
+ * 内置预设服务商目录（用户在「常用模型」中可一键添加）
+ * - id: 唯一 id，也用于迁移
+ * - protocol: 'claude' (Anthropic SDK) | 'openai' (OpenAI 兼容 chat completions)
+ * - baseURL: OpenAI 兼容服务的 base url（claude 协议忽略）
+ * - defaultModel: 默认模型 id
+ * - vision: 是否支持图片输入
+ * - models: 推荐模型列表（UI datalist 用）
+ * - link: 申请页面
+ */
+SettingsService.PRESETS = {
+  claude: {
+    id: 'claude-default',
+    name: 'Claude (Anthropic)',
+    protocol: 'claude',
+    baseURL: '',
+    defaultModel: 'claude-3-5-sonnet-20241022',
+    vision: true,
+    models: [
+      'claude-3-5-sonnet-20241022',
+      'claude-3-5-haiku-20241022',
+      'claude-3-opus-20240229',
+      'claude-3-haiku-20240307'
+    ],
+    link: 'https://console.anthropic.com/settings/keys'
+  },
+  openai: {
+    id: 'openai-default',
+    name: 'OpenAI',
+    protocol: 'openai',
+    baseURL: 'https://api.openai.com/v1',
+    defaultModel: 'gpt-4o-mini',
+    vision: true,
+    models: ['gpt-4o', 'gpt-4o-mini', 'gpt-4-turbo', 'gpt-4.1', 'gpt-4.1-mini', 'o3-mini'],
+    link: 'https://platform.openai.com/api-keys'
+  },
+  minimax: {
+    id: 'minimax-default',
+    name: 'MiniMax',
+    protocol: 'openai',
+    baseURL: 'https://api.minimaxi.com/v1',
+    chatPath: '/text/chatcompletion_v2',
+    defaultModel: 'MiniMax-M2.7',
+    vision: true,
+    models: ['MiniMax-M2.7', 'abab6.5-chat'],
+    link: 'https://platform.minimaxi.com'
+  },
+  kimi: {
+    id: 'kimi-default',
+    name: 'Kimi (Moonshot)',
+    protocol: 'openai',
+    baseURL: 'https://api.moonshot.cn/v1',
+    defaultModel: 'moonshot-v1-32k-vision-preview',
+    vision: true,
+    models: [
+      'moonshot-v1-32k-vision-preview',
+      'moonshot-v1-8k-vision-preview',
+      'moonshot-v1-32k',
+      'moonshot-v1-8k'
+    ],
+    link: 'https://platform.moonshot.cn/console/api-keys'
+  },
+  deepseek: {
+    id: 'deepseek-default',
+    name: 'DeepSeek',
+    protocol: 'openai',
+    baseURL: 'https://api.deepseek.com/v1',
+    defaultModel: 'deepseek-chat',
+    vision: false,
+    models: ['deepseek-chat', 'deepseek-reasoner'],
+    link: 'https://platform.deepseek.com/api_keys'
+  },
+  zhipu: {
+    id: 'zhipu-default',
+    name: '智谱 GLM',
+    protocol: 'openai',
+    baseURL: 'https://open.bigmodel.cn/api/paas/v4',
+    defaultModel: 'glm-4v-plus',
+    vision: true,
+    models: ['glm-4v-plus', 'glm-4-plus', 'glm-4-long', 'glm-4-flash'],
+    link: 'https://open.bigmodel.cn/usercenter/apikeys'
+  },
+  qwen: {
+    id: 'qwen-default',
+    name: '通义千问 (DashScope)',
+    protocol: 'openai',
+    baseURL: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+    defaultModel: 'qwen-vl-max-latest',
+    vision: true,
+    models: ['qwen-vl-max-latest', 'qwen-vl-plus', 'qwen-max-latest', 'qwen-plus', 'qwen-turbo'],
+    link: 'https://bailian.console.aliyun.com'
+  },
+  doubao: {
+    id: 'doubao-default',
+    name: '豆包 (火山引擎)',
+    protocol: 'openai',
+    baseURL: 'https://ark.cn-beijing.volces.com/api/v3',
+    defaultModel: 'doubao-pro-32k',
+    vision: false,
+    models: ['doubao-pro-32k', 'doubao-pro-128k', 'doubao-vision-pro-32k', 'doubao-lite-32k'],
+    link: 'https://www.volcengine.com/docs/82379'
+  }
+}
+
+/**
+ * 本地模型预设（apiKey 可为空）
+ */
+SettingsService.LOCAL_PRESETS = {
+  ollama: {
+    id: 'ollama-local',
+    name: 'Ollama 本地',
+    protocol: 'openai',
+    baseURL: 'http://localhost:11434/v1',
+    defaultModel: 'llama3.2',
+    vision: false,
+    models: ['llama3.2', 'llama3.2-vision', 'qwen2.5', 'gemma2'],
+    link: 'https://ollama.com'
+  },
+  lmstudio: {
+    id: 'lmstudio-local',
+    name: 'LM Studio',
+    protocol: 'openai',
+    baseURL: 'http://localhost:1234/v1',
+    defaultModel: 'local-model',
+    vision: false,
+    models: [],
+    link: 'https://lmstudio.ai'
+  },
+  vllm: {
+    id: 'vllm-local',
+    name: 'vLLM 本地',
+    protocol: 'openai',
+    baseURL: 'http://localhost:8000/v1',
+    defaultModel: '',
+    vision: false,
+    models: [],
+    link: 'https://docs.vllm.ai'
+  }
+}
 
 // 导出单例
 const settingsService = new SettingsService()
