@@ -175,21 +175,6 @@
     </div>
 
     <div class="settings-section">
-      <h3>截图设置</h3>
-      <div class="form-group">
-        <label for="screenshot-dir">截图保存目录</label>
-        <input
-          id="screenshot-dir"
-          v-model="settings.screenshotDir"
-          type="text"
-          class="form-input"
-        />
-        <button class="btn btn-secondary mt-2" @click="selectScreenshotDir">选择目录</button>
-      </div>
-      <button class="btn btn-primary" @click="saveSettingsHandler">保存设置</button>
-    </div>
-
-    <div class="settings-section">
       <h3>分类设置</h3>
       <p class="section-help">配置活动分类，用于AI判断应用属于哪个分类</p>
       <div class="form-group">
@@ -264,10 +249,11 @@
           <button class="btn btn-secondary" @click="importData">
             导入数据
           </button>
-          <button class="btn btn-danger" @click="clearData">
-            清除所有数据
+          <button class="btn btn-danger" @click="openClearDialog">
+            清理数据…
           </button>
         </div>
+        <p class="data-hint">支持按日期清理或全量清理；可选择是否保留 AI 总结/报告。</p>
       </div>
 
       <div class="settings-section">
@@ -284,13 +270,83 @@
       </div>
       </div>
     </div>
+
+    <!-- 清理数据向导弹窗 -->
+    <div v-if="showClearDialog" class="clear-modal-overlay" @click="closeClearDialog">
+      <div class="clear-modal-content" @click.stop>
+        <div class="clear-modal-header">
+          <h3>清理数据</h3>
+          <button class="clear-close-btn" @click="closeClearDialog">×</button>
+        </div>
+        <div class="clear-modal-body">
+          <p class="clear-warning">⚠ 此操作不可撤销，请谨慎选择清理范围与内容。</p>
+
+          <div class="clear-section-title">① 清理范围</div>
+          <div class="clear-options">
+            <label class="clear-option">
+              <input type="radio" v-model="clearScope" value="date" />
+              <div class="clear-option-body">
+                <div class="option-title">指定日期</div>
+                <input
+                  type="date"
+                  v-model="clearDate"
+                  :max="todayDateStr"
+                  class="date-input"
+                  :disabled="clearScope !== 'date'"
+                />
+              </div>
+            </label>
+            <label class="clear-option">
+              <input type="radio" v-model="clearScope" value="all" />
+              <div class="clear-option-body">
+                <div class="option-title">全部日期</div>
+                <div class="option-hint">作用于所有历史数据</div>
+              </div>
+            </label>
+          </div>
+
+          <div class="clear-section-title">② 清理内容</div>
+          <div class="clear-options">
+            <label class="clear-option">
+              <input type="radio" v-model="clearContent" value="screenshots" />
+              <div class="clear-option-body">
+                <div class="option-title">仅清理截图</div>
+                <div class="option-hint">
+                  删除截图原图（含附件），<strong>保留</strong> AI 标题/摘要/分类与日报告
+                </div>
+              </div>
+            </label>
+            <label class="clear-option danger">
+              <input type="radio" v-model="clearContent" value="everything" />
+              <div class="clear-option-body">
+                <div class="option-title">截图 + 总结 + 报告</div>
+                <div class="option-hint">
+                  删除截图、时间轴、月份索引、AI 日报告。<strong>保留</strong>设置（API Key / 分类）
+                </div>
+              </div>
+            </label>
+          </div>
+
+          <div v-if="clearResult" :class="['clear-result', clearResult.ok ? 'ok' : 'err']">
+            {{ clearResult.message }}
+          </div>
+        </div>
+        <div class="clear-modal-footer">
+          <button class="btn btn-secondary" @click="closeClearDialog" :disabled="clearing">
+            取消
+          </button>
+          <button class="btn btn-danger" @click="confirmClear" :disabled="clearing">
+            {{ clearing ? '清理中…' : '确认清理' }}
+          </button>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
 <script setup>
 import { ref, reactive, onMounted, computed } from 'vue'
 import { AIService } from '../services/AIService'
-import { Storage, DataManager } from '../utils/storage'
 import settingsService from '../services/Settings'
 
 const emit = defineEmits(['close', 'settings-updated'])
@@ -454,7 +510,6 @@ const settings = reactive({
   autoStart: false,
   notifications: true,
   screenshotInterval: 30,
-  screenshotDir: '',
   defaultCategory: '',
   aiModel: ''
 })
@@ -480,7 +535,7 @@ const saveCategories = () => {
   allSettings.categories = categories.value
   allSettings.defaultCategory = settings.defaultCategory
   const success = settingsService.saveSettings(allSettings)
-  emit('settings-updated', settings)
+  emit('settings-updated', { ...settings, __settingsSaved: true })
   if (typeof utools !== 'undefined' && typeof utools.showNotification === 'function') {
     utools.showNotification(success ? '分类设置已保存' : '分类设置保存失败')
   }
@@ -494,7 +549,6 @@ const loadSettings = () => {
     'autoStart',
     'notifications',
     'screenshotInterval',
-    'screenshotDir',
     'defaultCategory',
     'aiModel'
   ]
@@ -543,7 +597,7 @@ const saveApiKeys = () => {
   // 同步「已保存」基线
   savedApiKey.value = currentApiKey.value
   savedModelName.value = currentModelName.value
-  emit('settings-updated', settings)
+  emit('settings-updated', { ...settings, __settingsSaved: true })
   if (typeof utools !== 'undefined' && typeof utools.showNotification === 'function') {
     utools.showNotification('设置已保存')
   }
@@ -623,7 +677,6 @@ const saveSettingsHandler = () => {
     autoStart: settings.autoStart,
     notifications: settings.notifications,
     screenshotInterval: settings.screenshotInterval,
-    screenshotDir: settings.screenshotDir,
     defaultCategory: settings.defaultCategory,
     aiModel: settings.aiModel
   }
@@ -633,7 +686,7 @@ const saveSettingsHandler = () => {
 
   console.log('[FocusFlow] saveSettingsHandler 写入：', merged)
   const success = settingsService.saveSettings(merged)
-  emit('settings-updated', merged)
+  emit('settings-updated', { ...merged, __settingsSaved: true })
   if (typeof utools !== 'undefined' && typeof utools.showNotification === 'function') {
     utools.showNotification(success ? '设置已保存' : '设置保存失败，请查看控制台')
   }
@@ -641,43 +694,230 @@ const saveSettingsHandler = () => {
   loadSettings()
 }
 
-const exportData = () => {
-  const data = DataManager.export()
-  DataManager.download(data)
+const exportData = async () => {
+  if (typeof window.exportAllData !== 'function') {
+    utools?.showNotification?.('当前环境不支持 exportAllData')
+    return
+  }
+  const includeScreenshots = window.confirm(
+    '是否包含截图原图？\n\n· 「确定」：包含截图（文件体积可能很大，几百 MB 起步）\n· 「取消」：仅导出 AI 标题/摘要/分类/日报告/日历索引（推荐，文件小）'
+  )
+  utools?.showNotification?.(
+    includeScreenshots ? '正在导出截图，可能耗时较久…' : '正在导出数据…'
+  )
+  try {
+    const payload = await window.exportAllData({ includeScreenshots })
+    if (!payload) {
+      utools?.showNotification?.('导出失败，请查看控制台')
+      return
+    }
+    const ts = new Date()
+    const pad = (n) => String(n).padStart(2, '0')
+    const name = `focusflow-backup-${ts.getFullYear()}${pad(ts.getMonth() + 1)}${pad(ts.getDate())}-${pad(ts.getHours())}${pad(ts.getMinutes())}.json`
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = name
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+    URL.revokeObjectURL(url)
+
+    const sizeMB = (blob.size / 1024 / 1024).toFixed(2)
+    utools?.showNotification?.(
+      `导出完成：${payload.timeslots.length} 时段 / ${payload.reports.length} 报告 / ${payload.screenshots.length} 截图（${sizeMB} MB）`
+    )
+  } catch (e) {
+    console.error('exportData 异常:', e)
+    utools?.showNotification?.('导出异常：' + (e?.message || String(e)))
+  }
 }
 
 const importData = () => {
+  if (typeof window.importAllData !== 'function') {
+    utools?.showNotification?.('当前环境不支持 importAllData')
+    return
+  }
   const input = document.createElement('input')
   input.type = 'file'
-  input.accept = '.json'
+  input.accept = '.json,application/json'
   input.onchange = (event) => {
-    const file = event.target.files[0]
-    if (file) {
-      const reader = new FileReader()
-      reader.onload = (e) => {
-        try {
-          const data = JSON.parse(e.target.result)
-          if (DataManager.import(data)) {
-            utools?.showNotification('数据导入成功')
-            emit('close')
-          } else {
-            utools?.showNotification('数据导入失败')
-          }
-        } catch (error) {
-          utools?.showNotification('文件格式错误')
+    const file = event.target.files && event.target.files[0]
+    if (!file) return
+    const reader = new FileReader()
+    reader.onload = async (e) => {
+      try {
+        const payload = JSON.parse(e.target.result)
+        if (!payload || payload.meta?.app !== 'focusflow') {
+          utools?.showNotification?.('文件格式不正确（不是 FocusFlow 导出包）')
+          return
         }
+        const exportedTime = payload.meta?.exportedAt
+          ? new Date(payload.meta.exportedAt).toLocaleString()
+          : '未知时间'
+        const counts = `时段 ${payload.timeslots?.length || 0} / 月份 ${payload.months?.length || 0} / 报告 ${payload.reports?.length || 0} / 截图 ${payload.screenshots?.length || 0}`
+
+        // 询问导入模式
+        const overwrite = window.confirm(
+          `备份文件信息：\n· 导出时间：${exportedTime}\n· 内容：${counts}\n\n请选择导入模式：\n· 「确定」覆盖：先清空现有数据再导入（仅保留你的设置）\n· 「取消」合并：与现有数据合并（同 _id 用导入数据覆盖，其余保留）`
+        )
+        const mode = overwrite ? 'overwrite' : 'merge'
+
+        utools?.showNotification?.(
+          mode === 'overwrite' ? '正在覆盖式导入…' : '正在合并式导入…'
+        )
+        const result = await window.importAllData(payload, { mode })
+        if (!result || !result.ok) {
+          utools?.showNotification?.('导入失败：' + (result?.message || '未知错误'))
+          return
+        }
+        const i = result.imported
+        utools?.showNotification?.(
+          `导入完成（${mode === 'overwrite' ? '覆盖' : '合并'}）：时段 ${i.timeslots} / 月份 ${i.months} / 报告 ${i.reports} / 截图 ${i.screenshots}`
+        )
+        // 通知 App 刷新所有 UI（共用 __clearedAll 的重置链路）
+        emit('settings-updated', { __clearedAll: true })
+        emit('close')
+      } catch (error) {
+        console.error('importData 异常:', error)
+        utools?.showNotification?.('文件解析失败：' + (error?.message || '未知'))
       }
-      reader.readAsText(file)
     }
+    reader.readAsText(file)
   }
   input.click()
 }
 
-const clearData = () => {
-  if (confirm('确定要清除所有数据吗？此操作不可恢复。')) {
-    Storage.clear()
-    utools?.showNotification('数据已清除')
-    emit('close')
+// ========== 清理数据向导 ==========
+const showClearDialog = ref(false)
+const clearScope = ref('date')        // 'date' | 'all'
+const clearContent = ref('screenshots') // 'screenshots' | 'everything'
+const clearDate = ref('')
+const clearing = ref(false)
+const clearResult = ref(null)
+const todayDateStr = computed(() => {
+  const d = new Date()
+  const pad = (n) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+})
+
+const openClearDialog = () => {
+  clearScope.value = 'date'
+  clearContent.value = 'screenshots'
+  clearDate.value = todayDateStr.value
+  clearResult.value = null
+  clearing.value = false
+  showClearDialog.value = true
+}
+
+const closeClearDialog = () => {
+  if (clearing.value) return
+  showClearDialog.value = false
+  clearResult.value = null
+}
+
+/**
+ * 清理逻辑：按「范围 × 内容」走 4 个分支
+ *  - all + screenshots  → clearScreenshotsOnly({ scope:'all' })
+ *  - date + screenshots → clearScreenshotsOnly({ scope:'date', dateStr })
+ *  - all + everything   → clearAllData()  + 不需要再单独删 dailyreport（clearAllData 已包含）
+ *  - date + everything  → clearDateData(dateStr) + removeDailyReport(dateStr)
+ */
+const confirmClear = async () => {
+  if (clearing.value) return
+  clearResult.value = null
+
+  const scope = clearScope.value
+  const content = clearContent.value
+  const dateStr = clearDate.value
+
+  if (scope === 'date' && !dateStr) {
+    clearResult.value = { ok: false, message: '请先选择日期' }
+    return
+  }
+
+  // 二次确认（醒目）
+  const tipScope = scope === 'all' ? '全部日期' : `${dateStr} 这一天`
+  const tipContent = content === 'screenshots'
+    ? '仅截图原图（保留 AI 总结/分类/日报告）'
+    : '截图 + 时间轴 + 分类 + 日报告（仅保留你的设置）'
+  const tip = `确定要清理 ${tipScope} 的「${tipContent}」吗？\n\n此操作不可恢复！`
+  if (!window.confirm(tip)) return
+
+  clearing.value = true
+  try {
+    let result = null
+    let removedSummary = ''
+
+    if (content === 'screenshots') {
+      if (typeof window.clearScreenshotsOnly !== 'function') {
+        throw new Error('clearScreenshotsOnly API 不可用')
+      }
+      result = window.clearScreenshotsOnly({ scope, dateStr })
+      removedSummary = `${result?.removed || 0} 张截图`
+    } else {
+      // everything：截图+总结+报告
+      if (scope === 'all') {
+        if (typeof window.clearAllData !== 'function') {
+          throw new Error('clearAllData API 不可用')
+        }
+        result = window.clearAllData()
+        // clearAllData 已经包含 dailyreport/，不需要额外处理
+      } else {
+        if (typeof window.clearDateData !== 'function') {
+          throw new Error('clearDateData API 不可用')
+        }
+        result = window.clearDateData(dateStr)
+        // clearDateData 不清 dailyreport，单独处理
+        try {
+          if (typeof window.removeDailyReport === 'function') {
+            window.removeDailyReport(dateStr)
+          }
+        } catch (e) {
+          console.warn('清理时同步删除日报告失败：', e)
+        }
+      }
+      removedSummary = `${result?.removed || 0} 条数据`
+    }
+
+    if (!result || !result.ok) {
+      clearResult.value = {
+        ok: false,
+        message: '清理失败：' + ((result && result.message) || '未知错误')
+      }
+      return
+    }
+
+    // 旧版 localStorage 残留（仅在 everything 时清）
+    if (content === 'everything') {
+      try {
+        localStorage.removeItem('focusflow-data')
+        localStorage.removeItem('focusflow-sessions')
+      } catch (e) {}
+    }
+
+    clearResult.value = {
+      ok: true,
+      message: `已清理 ${removedSummary}（${tipScope} · ${content === 'screenshots' ? '仅截图' : '全部'}）`
+    }
+    utools?.showNotification?.('清理完成')
+
+    // 通知 App.vue 重置内存态并刷新（沿用 __clearedAll 链路）
+    emit('settings-updated', { __clearedAll: true })
+
+    // 1.2 秒后自动关闭弹窗
+    setTimeout(() => {
+      if (clearResult.value && clearResult.value.ok) {
+        showClearDialog.value = false
+        clearResult.value = null
+      }
+    }, 1200)
+  } catch (e) {
+    console.error('[FocusFlow] confirmClear 异常:', e)
+    clearResult.value = { ok: false, message: '清理异常：' + (e?.message || String(e)) }
+  } finally {
+    clearing.value = false
   }
 }
 
@@ -690,27 +930,6 @@ const openHomepage = () => {
 const reportIssue = () => {
   if (utools) {
     utools.shellOpenExternal('https://github.com/yourname/focusflow/issues')
-  }
-}
-
-const selectScreenshotDir = () => {
-  try {
-    if (typeof utools !== 'undefined' && typeof utools.showOpenDialog === 'function') {
-      utools.showOpenDialog({
-        title: '选择截图保存目录',
-        properties: ['openDirectory']
-      }, (files) => {
-        if (files && files.length > 0) {
-          settings.screenshotDir = files[0]
-        }
-      })
-    } else {
-      const defaultDir = process.env.HOME || process.env.USERPROFILE
-      const screenshotsDir = `${defaultDir}/Pictures/FocusFlow`
-      settings.screenshotDir = screenshotsDir
-    }
-  } catch (error) {
-    // Silent fail
   }
 }
 
@@ -1253,4 +1472,126 @@ onMounted(() => {
     padding: 16px;
   }
 }
+
+/* ========== 清理数据弹窗 ========== */
+.data-hint {
+  margin: 10px 0 0 0;
+  font-size: 12px;
+  color: #7f8c8d;
+}
+.clear-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 2000;
+  padding: 16px;
+}
+.clear-modal-content {
+  background: white;
+  border-radius: 10px;
+  width: 100%;
+  max-width: 520px;
+  max-height: calc(100% - 32px);
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.3);
+  overflow: hidden;
+}
+.clear-modal-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 14px 20px;
+  border-bottom: 1px solid #e1e5e9;
+}
+.clear-modal-header h3 {
+  margin: 0;
+  font-size: 16px;
+  color: #2c3e50;
+}
+.clear-close-btn {
+  width: 28px;
+  height: 28px;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  font-size: 22px;
+  color: #95a5a6;
+  border-radius: 4px;
+}
+.clear-close-btn:hover { background: #f1f3f5; color: #2c3e50; }
+.clear-modal-body {
+  padding: 16px 20px;
+  overflow-y: auto;
+}
+.clear-modal-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px 20px;
+  border-top: 1px solid #e1e5e9;
+  background: #fafbfc;
+}
+.clear-warning {
+  background: #fff8e6;
+  color: #b8860b;
+  padding: 10px 12px;
+  border-radius: 6px;
+  font-size: 13px;
+  margin: 0 0 16px 0;
+}
+.clear-section-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #2c3e50;
+  margin: 14px 0 8px;
+}
+.clear-section-title:first-of-type { margin-top: 0; }
+.clear-options {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.clear-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid #e1e5e9;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+.clear-option:hover { border-color: #3498db; background: #f8fbfd; }
+.clear-option.danger:hover { border-color: #e74c3c; background: #fef6f5; }
+.clear-option input[type="radio"] {
+  margin-top: 3px;
+  accent-color: #e74c3c;
+  flex-shrink: 0;
+}
+.clear-option-body { flex: 1; min-width: 0; }
+.option-title { font-size: 14px; font-weight: 600; color: #2c3e50; margin-bottom: 4px; }
+.option-hint { font-size: 12px; color: #7f8c8d; line-height: 1.55; }
+.date-input {
+  margin-top: 4px;
+  padding: 6px 10px;
+  border: 1px solid #d0d7de;
+  border-radius: 4px;
+  font-size: 13px;
+  color: #2c3e50;
+  outline: none;
+}
+.date-input:focus { border-color: #3498db; }
+.date-input:disabled { background: #f1f3f5; color: #95a5a6; cursor: not-allowed; }
+.clear-result {
+  margin-top: 14px;
+  padding: 10px 12px;
+  border-radius: 6px;
+  font-size: 13px;
+}
+.clear-result.ok { background: #e8f8f0; color: #27ae60; border: 1px solid #abebc6; }
+.clear-result.err { background: #fdecea; color: #c0392b; border: 1px solid #f5b7b1; }
 </style>

@@ -25,10 +25,7 @@ class SettingsService {
       notifications: true,
       // 截图间隔（秒），最小 5 秒，最大 600 秒
       screenshotInterval: 30,
-      
-      // 截图设置
-      screenshotDir: '',
-      
+
       // 分类设置
       categories: [
         {
@@ -418,27 +415,6 @@ class SettingsService {
     }
     return this.saveSettings(settings)
   }
-
-  /**
-   * 加载截图设置
-   * @returns {string} 截图保存目录
-   */
-  loadScreenshotSettings() {
-    const settings = this.loadSettings()
-    return settings.screenshotDir || this.defaultSettings.screenshotDir
-  }
-
-  /**
-   * 保存截图设置
-   * @param {string} screenshotDir 截图保存目录
-   * @returns {boolean} 是否保存成功
-   */
-  saveScreenshotSettings(screenshotDir) {
-    const settings = this.loadSettings()
-    settings.screenshotDir = screenshotDir
-    return this.saveSettings(settings)
-  }
-
 
 }
 

@@ -407,21 +407,28 @@ export class ActivityTracker {
         }
       }
       const slots = []
-      for (const slot of rawSlots) {
-        if (!slot || !Array.isArray(slot.screenshots) || slot.screenshots.length === 0) continue
-        const id = slot._id
-          ? Number(String(slot._id).replace('timeslot/', ''))
-          : null
-        slots.push({
-          id: id,
-          time: slot.time || (id ? formatTimeslot(id) : ''),
-          title: slot.title || '',
-          categories: slot.categories || [],
-          summary: slot.summary || '',
-          detail: slot.detail || '',
-          screenshots: slot.screenshots || []
-        })
-      }
+    for (const slot of rawSlots) {
+      if (!slot) continue
+      const screenshots = Array.isArray(slot.screenshots) ? slot.screenshots : []
+      const hasSummary =
+        (slot.title && String(slot.title).trim()) ||
+        (slot.summary && String(slot.summary).trim()) ||
+        (Array.isArray(slot.categories) && slot.categories.length > 0)
+      // 同时为空（既没截图也没 AI 总结）才跳过；保留「仅清截图」后仍含总结的时段
+      if (screenshots.length === 0 && !hasSummary) continue
+      const id = slot._id
+        ? Number(String(slot._id).replace('timeslot/', ''))
+        : null
+      slots.push({
+        id: id,
+        time: slot.time || (id ? formatTimeslot(id) : ''),
+        title: slot.title || '',
+        categories: slot.categories || [],
+        summary: slot.summary || '',
+        detail: slot.detail || '',
+        screenshots
+      })
+    }
       console.log('[FocusFlow] loadTimelineForDate', dateStr, '→', slots.length, '个有效时间槽')
       return slots
     } catch (e) {

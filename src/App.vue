@@ -56,7 +56,6 @@
         <button class="btn btn-primary" :disabled="generatingReport" @click="openReport">
           {{ generatingReport ? '生成中…' : (aiReport ? '查看 AI 报告' : 'AI 生成报告') }}
         </button>
-        <button class="btn btn-warning" @click="openClearDialog">清空数据</button>
         <button class="btn btn-secondary" @click="openSettings">设置</button>
       </div>
     </header>
@@ -103,7 +102,11 @@
           <div v-else-if="reportError" class="ai-report-error">
             ✗ {{ reportError }}
           </div>
-          <pre v-else-if="aiReport" class="report-content">{{ aiReport }}</pre>
+          <div
+            v-else-if="aiReport"
+            class="report-content markdown-body"
+            v-html="aiReportHtml"
+          ></div>
           <div v-else class="report-empty">
             <p>今日还没有生成 AI 报告</p>
             <button class="btn btn-primary" :disabled="generatingReport" @click="generateReport(false)">
@@ -210,7 +213,11 @@
               </div>
               <p class="timeline-time">{{ item.time }}</p>
               <p v-if="item.summary" class="timeline-summary">{{ item.summary }}</p>
-              <p class="timeline-meta">截图 {{ item.screenshots.length }} 张</p>
+              <p class="timeline-meta">
+                {{ item.screenshots.length > 0
+                    ? `截图 ${item.screenshots.length} 张`
+                    : '截图已清理（保留 AI 总结）' }}
+              </p>
             </div>
           </div>
         </div>
@@ -285,59 +292,25 @@
       </div>
     </div>
 
-    <!-- 清空数据弹窗 -->
-    <div v-if="showClearDialog" class="modal-overlay" @click="closeClearDialog">
-      <div class="modal-content modal-sm" @click.stop>
-        <div class="modal-header">
-          <h3>清空数据</h3>
-          <button class="close-btn" @click="closeClearDialog">×</button>
-        </div>
-        <div class="modal-body">
-          <p class="clear-warning">⚠ 此操作不可撤销，请谨慎选择清空范围。</p>
-          <div class="clear-options">
-            <label class="clear-option">
-              <input type="radio" v-model="clearScope" value="date" />
-              <div>
-                <div class="option-title">清空指定日期的数据</div>
-                <input
-                  type="date"
-                  v-model="clearDate"
-                  :max="todayDateStr"
-                  class="date-input"
-                  :disabled="clearScope !== 'date'"
-                />
-              </div>
-            </label>
-            <label class="clear-option">
-              <input type="radio" v-model="clearScope" value="all" />
-              <div>
-                <div class="option-title">清空全部截图数据</div>
-                <div class="option-hint">将删除所有日期的截图、时间轴和月份索引（设置保留）</div>
-              </div>
-            </label>
-          </div>
-          <div v-if="clearResult" :class="['clear-result', clearResult.ok ? 'ok' : 'err']">
-            {{ clearResult.message }}
-          </div>
-        </div>
-        <div class="modal-footer">
-          <button class="btn btn-secondary" @click="closeClearDialog" :disabled="clearing">取消</button>
-          <button class="btn btn-danger" @click="confirmClear" :disabled="clearing">
-            {{ clearing ? '清理中…' : '确认清空' }}
-          </button>
-        </div>
-      </div>
-    </div>
+    <!-- 清空数据弹窗已迁移到「设置 → 数据管理」 -->
   </div>
 </template>
 
 <script setup>
 import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
+import { marked } from 'marked'
+import DOMPurify from 'dompurify'
 import { ActivityTracker } from './services/ActivityTracker'
 import { AIService } from './services/AIService'
 import settingsService from './services/Settings.js'
 import AppUsageChart from './components/AppUsageChart.vue'
 import SettingsPanel from './components/SettingsPanel.vue'
+
+// 配置 marked：开启 GFM、自动换行（AI 输出常含单换行）
+marked.setOptions({
+  gfm: true,
+  breaks: true
+})
 
 const activityTracker = new ActivityTracker()
 const aiService = new AIService()
@@ -357,6 +330,21 @@ const analyzingSlotIds = ref(new Set())
 const categoriesConfig = ref([]) // 用户配置的分类（含颜色）
 const chartData = ref([])
 const aiReport = ref('')
+// AI 报告 Markdown 渲染（marked → DOMPurify 防 XSS）
+const aiReportHtml = computed(() => {
+  const text = aiReport.value
+  if (!text) return ''
+  try {
+    const rawHtml = marked.parse(text)
+    return DOMPurify.sanitize(rawHtml, {
+      // 允许常见富文本标签 + checkbox（GFM 任务列表）
+      ADD_ATTR: ['target', 'rel']
+    })
+  } catch (e) {
+    console.error('[FocusFlow] 渲染 Markdown 失败:', e)
+    return ''
+  }
+})
 // 日报告附加信息（生成模型、时间）
 const aiReportMeta = ref({ model: '', generatedAt: 0, slotCount: 0, cached: false })
 const generatingReport = ref(false)
@@ -382,19 +370,7 @@ const screenshotIndex = ref(0)
 const isPlaying = ref(false)
 let playTimer = null
 
-// 清空数据弹窗
-const showClearDialog = ref(false)
-const clearScope = ref('date') // 'date' | 'all'
-const clearDate = ref('')
-const clearing = ref(false)
-const clearResult = ref(null) // { ok, message }
-const todayDateStr = computed(() => {
-  const d = new Date()
-  const y = d.getFullYear()
-  const m = String(d.getMonth() + 1).padStart(2, '0')
-  const day = String(d.getDate()).padStart(2, '0')
-  return `${y}-${m}-${day}`
-})
+// 清空数据相关 state 已移至 SettingsPanel
 
 // 自动刷新（追踪开启时启用）
 let autoRefreshTimer = null
@@ -678,104 +654,40 @@ function openSettings() {
   showSettings.value = true
 }
 
-function onSettingsUpdated() {
-  // 设置更新后：如果正在追踪，按新截图间隔重启截图定时器
-  try {
-    if (activityTracker.isTracking && typeof activityTracker.restartScreenshotTimer === 'function') {
-      const sec = activityTracker.restartScreenshotTimer()
-      if (sec > 0 && window.utools?.showNotification) {
-        window.utools.showNotification(`截图间隔已更新为 ${sec} 秒`)
-      }
-    }
-  } catch (e) {
-    console.error('onSettingsUpdated 失败:', e)
-  }
-}
-
-// ========== 清空数据 ==========
-
-function openClearDialog() {
-  clearScope.value = 'date'
-  clearDate.value = formatSelectedDate(selectedDate.value)
-  clearResult.value = null
-  clearing.value = false
-  showClearDialog.value = true
-}
-
-function closeClearDialog() {
-  if (clearing.value) return
-  showClearDialog.value = false
-  clearResult.value = null
-}
-
-async function confirmClear() {
-  if (clearing.value) return
-  clearResult.value = null
-  // 二次确认
-  const isAll = clearScope.value === 'all'
-  const tip = isAll
-    ? '确定要清空全部截图数据吗？此操作不可撤销！'
-    : `确定要清空 ${clearDate.value} 当天的截图数据吗？此操作不可撤销！`
-  if (!window.confirm(tip)) return
-
-  clearing.value = true
-  try {
-    let result
-    if (isAll) {
-      if (typeof window.clearAllData !== 'function') {
-        throw new Error('clearAllData API 不可用')
-      }
-      result = window.clearAllData()
-      // 同步清掉所有日期的 AI 报告（粗暴遍历当月即可，跨月用户重生即可）
-      try {
-        const months = await activityTracker.getMonthData(
-          selectedDate.value.getFullYear(),
-          selectedDate.value.getMonth() + 1
-        )
-        const y = selectedDate.value.getFullYear()
-        const m = String(selectedDate.value.getMonth() + 1).padStart(2, '0')
-        ;(months || []).forEach((d) => {
-          const day = String(d).padStart(2, '0')
-          activityTracker.removeDailyReport(`${y}-${m}-${day}`)
-        })
-      } catch (e) {
-        console.warn('清空时同步删除当月日报告失败：', e)
-      }
-    } else {
-      if (!clearDate.value) {
-        throw new Error('请先选择日期')
-      }
-      if (typeof window.clearDateData !== 'function') {
-        throw new Error('clearDateData API 不可用')
-      }
-      result = window.clearDateData(clearDate.value)
-      // 同步清掉这一天的 AI 报告
-      activityTracker.removeDailyReport(clearDate.value)
-    }
-    if (result && result.ok) {
-      clearResult.value = {
-        ok: true,
-        message: `已清空 ${result.removed} 条数据${isAll ? '（全部）' : `（${clearDate.value}）`}。`
-      }
-      // 刷新页面数据
-      await refreshAll()
-      // 1.2 秒后自动关闭
-      setTimeout(() => {
-        if (clearResult.value && clearResult.value.ok) {
-          showClearDialog.value = false
-          clearResult.value = null
+function onSettingsUpdated(payload) {
+  // 只有「保存设置」事件才需要按新截图间隔重启定时器并提示用户
+  // （清理数据/导入数据 走的是 __clearedAll 路径，不会改 screenshotInterval，但同样会发 settings-updated）
+  if (payload && payload.__settingsSaved) {
+    try {
+      if (activityTracker.isTracking && typeof activityTracker.restartScreenshotTimer === 'function') {
+        const sec = activityTracker.restartScreenshotTimer()
+        if (sec > 0 && window.utools?.showNotification) {
+          window.utools.showNotification(`截图间隔已更新为 ${sec} 秒`)
         }
-      }, 1200)
-    } else {
-      clearResult.value = {
-        ok: false,
-        message: '清空失败：' + ((result && result.message) || '未知错误')
       }
+    } catch (e) {
+      console.error('onSettingsUpdated 失败:', e)
     }
-  } catch (e) {
-    clearResult.value = { ok: false, message: '清空异常：' + (e && e.message) }
-  } finally {
-    clearing.value = false
+  }
+
+  // 如果是「清理数据 / 导入数据」事件，需要把页面状态全部重置（包括 AI 报告/弹窗/分析中等内存态）
+  if (payload && payload.__clearedAll) {
+    try {
+      aiReport.value = ''
+      aiReportMeta.value = { model: '', generatedAt: 0, slotCount: 0, cached: false }
+      reportError.value = ''
+      showReport.value = false
+      analyzingSlotIds.value = new Set()
+      timelineData.value = []
+      topApps.value = []
+      topCategories.value = []
+      chartData.value = []
+      datesWithData.value = []
+    } catch (e) {
+      console.warn('清除后重置 App 内存态失败：', e)
+    }
+    // 异步触发一次完整刷新（从已空/部分清空的 db 读回，所有 section 都会更新）
+    refreshAll()
   }
 }
 
@@ -1299,7 +1211,6 @@ async function reanalyzeSlot(item) {
 .ai-report { background: #f8f9fa; padding: 16px; border-radius: 6px; border-left: 4px solid #3498db; }
 .report-content {
   margin: 0;
-  white-space: pre-wrap;
   word-break: break-word;
   font-family: inherit;
   font-size: 14px;
@@ -1398,6 +1309,114 @@ async function reanalyzeSlot(item) {
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
   font-size: 15px;
   line-height: 1.8;
+}
+
+/* ========== Markdown 渲染样式（仅作用于 .markdown-body 内部） ========== */
+/* 注意：本组件 <style scoped>，所以 v-html 注入的子节点必须用 :deep() 才能命中 */
+.markdown-body :deep(h1),
+.markdown-body :deep(h2),
+.markdown-body :deep(h3),
+.markdown-body :deep(h4),
+.markdown-body :deep(h5),
+.markdown-body :deep(h6) {
+  margin: 1.4em 0 0.6em;
+  color: #2c3e50;
+  font-weight: 600;
+  line-height: 1.35;
+}
+.markdown-body :deep(h1:first-child),
+.markdown-body :deep(h2:first-child),
+.markdown-body :deep(h3:first-child) {
+  margin-top: 0;
+}
+.markdown-body :deep(h1) { font-size: 1.6em; border-bottom: 1px solid #ecf0f1; padding-bottom: 0.3em; }
+.markdown-body :deep(h2) { font-size: 1.35em; border-bottom: 1px solid #ecf0f1; padding-bottom: 0.25em; }
+.markdown-body :deep(h3) { font-size: 1.18em; color: #3498db; }
+.markdown-body :deep(h4) { font-size: 1.06em; }
+.markdown-body :deep(p) {
+  margin: 0.6em 0;
+  color: #34495e;
+}
+.markdown-body :deep(strong) { color: #2c3e50; font-weight: 600; }
+.markdown-body :deep(em) { color: #34495e; }
+.markdown-body :deep(ul),
+.markdown-body :deep(ol) {
+  margin: 0.5em 0;
+  padding-left: 1.6em;
+}
+.markdown-body :deep(li) {
+  margin: 0.25em 0;
+  color: #34495e;
+}
+.markdown-body :deep(li > p) { margin: 0.2em 0; }
+.markdown-body :deep(blockquote) {
+  margin: 0.8em 0;
+  padding: 0.4em 0.9em;
+  color: #5d6d7e;
+  border-left: 4px solid #3498db;
+  background: #f8fbfd;
+  border-radius: 0 6px 6px 0;
+}
+.markdown-body :deep(code) {
+  background: #f4f6f8;
+  color: #c0392b;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 0.9em;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+.markdown-body :deep(pre) {
+  margin: 0.8em 0;
+  padding: 14px 16px;
+  background: #2c3e50;
+  color: #ecf0f1;
+  border-radius: 6px;
+  overflow-x: auto;
+  font-size: 13px;
+  line-height: 1.55;
+}
+.markdown-body :deep(pre code) {
+  background: transparent;
+  color: inherit;
+  padding: 0;
+  border-radius: 0;
+  font-size: inherit;
+}
+.markdown-body :deep(a) {
+  color: #3498db;
+  text-decoration: none;
+  border-bottom: 1px dashed #3498db;
+}
+.markdown-body :deep(a:hover) { color: #2980b9; border-bottom-style: solid; }
+.markdown-body :deep(hr) {
+  margin: 1.4em 0;
+  border: none;
+  border-top: 1px solid #ecf0f1;
+}
+.markdown-body :deep(table) {
+  border-collapse: collapse;
+  margin: 0.8em 0;
+  width: 100%;
+  font-size: 0.95em;
+}
+.markdown-body :deep(th),
+.markdown-body :deep(td) {
+  border: 1px solid #e1e5e9;
+  padding: 8px 12px;
+  text-align: left;
+}
+.markdown-body :deep(th) {
+  background: #f8f9fa;
+  font-weight: 600;
+  color: #2c3e50;
+}
+.markdown-body :deep(img) {
+  max-width: 100%;
+  border-radius: 6px;
+}
+.markdown-body :deep(input[type="checkbox"]) {
+  margin-right: 6px;
+  vertical-align: middle;
 }
 .report-loading {
   display: flex;
@@ -1591,54 +1610,6 @@ async function reanalyzeSlot(item) {
   padding: 12px 20px 16px;
   border-top: 1px solid #e1e5e9;
 }
-
-.modal-sm { max-width: 480px; }
-
-.clear-warning {
-  background: #fff8e6;
-  color: #b8860b;
-  padding: 10px 12px;
-  border-radius: 6px;
-  font-size: 13px;
-  margin: 0 0 16px 0;
-}
-.clear-options {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-.clear-option {
-  display: flex;
-  align-items: flex-start;
-  gap: 10px;
-  padding: 12px;
-  border: 1px solid #e1e5e9;
-  border-radius: 6px;
-  cursor: pointer;
-  transition: border-color 0.15s, background 0.15s;
-}
-.clear-option:hover { border-color: #3498db; background: #f8fbfd; }
-.clear-option input[type="radio"] { margin-top: 3px; accent-color: #e74c3c; }
-.option-title { font-size: 14px; font-weight: 600; color: #2c3e50; margin-bottom: 6px; }
-.option-hint { font-size: 12px; color: #7f8c8d; line-height: 1.5; }
-.date-input {
-  padding: 6px 10px;
-  border: 1px solid #d0d7de;
-  border-radius: 4px;
-  font-size: 13px;
-  color: #2c3e50;
-  outline: none;
-}
-.date-input:focus { border-color: #3498db; }
-.date-input:disabled { background: #f1f3f5; color: #95a5a6; cursor: not-allowed; }
-.clear-result {
-  margin-top: 12px;
-  padding: 10px 12px;
-  border-radius: 6px;
-  font-size: 13px;
-}
-.clear-result.ok { background: #e8f8f0; color: #27ae60; }
-.clear-result.err { background: #fdecea; color: #c0392b; }
 
 .ai-summary p { margin: 6px 0; font-size: 14px; line-height: 1.6; color: #34495e; }
 

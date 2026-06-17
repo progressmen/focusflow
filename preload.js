@@ -573,12 +573,258 @@ if (typeof utools !== 'undefined') {
     }
   }
 
+  // ========== 数据导出 / 导入 ==========
+  // 导出格式（FocusFlow Backup v1）：
+  // {
+  //   meta: { app: 'focusflow', version: 1, exportedAt, includeScreenshots },
+  //   timeslots: [ {_id, title, summary, detail, categories, time, screenshots} ],
+  //   months:    [ {_id, dates} ],
+  //   reports:   [ {_id, content, model, generatedAt, slotCount, stats} ],
+  //   screenshots: [ {_id, app, time, timestamp, mime, dataUrl} ]  // 可选
+  // }
+  // 注意：故意不导出 settings/apiKey，避免凭证泄漏（导入时也不动设置）
+  window.exportAllData = async (options = {}) => {
+    try {
+      const includeScreenshots = !!options.includeScreenshots
+      const payload = {
+        meta: {
+          app: 'focusflow',
+          version: 1,
+          exportedAt: Date.now(),
+          includeScreenshots
+        },
+        timeslots: [],
+        months: [],
+        reports: [],
+        screenshots: []
+      }
+
+      // 1. timeslot 文档
+      try {
+        const slots = utools.db.allDocs('timeslot/') || []
+        for (const s of slots) {
+          payload.timeslots.push({
+            _id: s._id,
+            title: s.title || '',
+            summary: s.summary || '',
+            detail: s.detail || '',
+            categories: Array.isArray(s.categories) ? s.categories : [],
+            time: s.time || '',
+            screenshots: Array.isArray(s.screenshots) ? s.screenshots : []
+          })
+        }
+      } catch (e) {
+        console.error('export timeslots 失败:', e)
+      }
+
+      // 2. month 文档
+      try {
+        const months = utools.db.allDocs('month/') || []
+        for (const m of months) {
+          payload.months.push({
+            _id: m._id,
+            dates: Array.isArray(m.dates) ? m.dates.slice() : []
+          })
+        }
+      } catch (e) {
+        console.error('export months 失败:', e)
+      }
+
+      // 3. AI 日报告
+      try {
+        const reports = utools.db.allDocs('dailyreport/') || []
+        for (const r of reports) {
+          payload.reports.push({
+            _id: r._id,
+            content: r.content || '',
+            model: r.model || '',
+            generatedAt: r.generatedAt || 0,
+            slotCount: r.slotCount || 0,
+            stats: r.stats || null
+          })
+        }
+      } catch (e) {
+        console.error('export reports 失败:', e)
+      }
+
+      // 4. 截图（仅当用户勾选）—— 体积非常大，谨慎导出
+      if (includeScreenshots) {
+        try {
+          const shots = utools.db.allDocs('screenshot/') || []
+          for (const sh of shots) {
+            try {
+              const attachment = utools.db.getAttachment(sh._id)
+              if (!attachment) continue
+              const mime = sh.mime || 'image/png'
+              const dataUrl = await binaryToDataUrl(attachment, mime)
+              if (!dataUrl) continue
+              payload.screenshots.push({
+                _id: sh._id,
+                app: sh.app || '',
+                time: sh.time || '',
+                timestamp: sh.timestamp || 0,
+                mime,
+                dataUrl
+              })
+            } catch (e) {
+              console.warn('export 单张截图失败:', sh._id, e)
+            }
+          }
+        } catch (e) {
+          console.error('export screenshots 失败:', e)
+        }
+      }
+
+      console.log('[FocusFlow] exportAllData:', {
+        timeslots: payload.timeslots.length,
+        months: payload.months.length,
+        reports: payload.reports.length,
+        screenshots: payload.screenshots.length
+      })
+      return payload
+    } catch (e) {
+      console.error('exportAllData 失败:', e)
+      return null
+    }
+  }
+
+  // 导入数据
+  // @param payload 上面 exportAllData 的返回值
+  // @param options.mode 'merge'（默认，与现有合并） | 'overwrite'（先清空再写入）
+  window.importAllData = async (payload, options = {}) => {
+    try {
+      if (!payload || payload.meta?.app !== 'focusflow') {
+        return { ok: false, message: '文件格式不正确（不是 FocusFlow 导出包）' }
+      }
+      const mode = options.mode === 'overwrite' ? 'overwrite' : 'merge'
+      let imported = { timeslots: 0, months: 0, reports: 0, screenshots: 0 }
+
+      // overwrite 模式：先清空业务数据（不动设置）
+      if (mode === 'overwrite') {
+        try {
+          const prefixes = ['screenshot/', 'timeslot/', 'month/', 'dailyreport/']
+          for (const prefix of prefixes) {
+            const docs = utools.db.allDocs(prefix) || []
+            for (const d of docs) {
+              try { utools.db.remove(d._id) } catch (e) {}
+            }
+          }
+        } catch (e) {
+          console.error('import overwrite 清空失败:', e)
+        }
+      }
+
+      // 通用：put 时自动取最新 _rev（避免与已有文档冲突）
+      const safePut = (doc) => {
+        const cur = utools.db.get(doc._id)
+        const next = { ...doc }
+        delete next._rev
+        if (cur && cur._rev) next._rev = cur._rev
+        const r = utools.db.put(next)
+        return r && r.ok
+      }
+
+      // 1. timeslots
+      for (const s of (payload.timeslots || [])) {
+        if (!s || !s._id) continue
+        try {
+          if (safePut({
+            _id: s._id,
+            title: s.title || '',
+            summary: s.summary || '',
+            detail: s.detail || '',
+            categories: Array.isArray(s.categories) ? s.categories : [],
+            time: s.time || '',
+            screenshots: Array.isArray(s.screenshots) ? s.screenshots : []
+          })) imported.timeslots++
+        } catch (e) {
+          console.warn('import timeslot 失败:', s._id, e)
+        }
+      }
+
+      // 2. months —— merge 模式下应合并已有 dates（不要把已有数据踢掉）
+      for (const m of (payload.months || [])) {
+        if (!m || !m._id) continue
+        try {
+          let dates = Array.isArray(m.dates) ? m.dates.slice() : []
+          if (mode === 'merge') {
+            const cur = utools.db.get(m._id)
+            if (cur && Array.isArray(cur.dates)) {
+              const merged = new Set([...cur.dates, ...dates])
+              dates = Array.from(merged).sort((a, b) => a - b)
+            }
+          }
+          if (safePut({ _id: m._id, dates })) imported.months++
+        } catch (e) {
+          console.warn('import month 失败:', m._id, e)
+        }
+      }
+
+      // 3. reports
+      for (const r of (payload.reports || [])) {
+        if (!r || !r._id) continue
+        try {
+          if (safePut({
+            _id: r._id,
+            content: r.content || '',
+            model: r.model || '',
+            generatedAt: r.generatedAt || 0,
+            slotCount: r.slotCount || 0,
+            stats: r.stats || null
+          })) imported.reports++
+        } catch (e) {
+          console.warn('import report 失败:', r._id, e)
+        }
+      }
+
+      // 4. screenshots（如果导出包里有 dataUrl）
+      for (const sh of (payload.screenshots || [])) {
+        if (!sh || !sh._id || !sh.dataUrl) continue
+        try {
+          // 先写文档元数据
+          const doc = {
+            _id: sh._id,
+            app: sh.app || '',
+            time: sh.time || '',
+            timestamp: sh.timestamp || 0,
+            mime: sh.mime || 'image/png'
+          }
+          // 注意：postAttachment 会自动创建文档，不能先 put 否则 rev 冲突
+          // 这里覆盖现有文档：先删后写
+          try {
+            const cur = utools.db.get(sh._id)
+            if (cur) utools.db.remove(sh._id)
+          } catch (e) {}
+          const bytes = dataUrlToUint8Array(sh.dataUrl)
+          const r2 = utools.db.postAttachment(sh._id, bytes, doc.mime)
+          if (!r2.ok) continue
+          // postAttachment 已建文档，再 put 一次补 metadata 字段（带最新 rev）
+          const cur2 = utools.db.get(sh._id)
+          if (cur2) {
+            utools.db.put({ ...doc, _rev: cur2._rev })
+          }
+          imported.screenshots++
+        } catch (e) {
+          console.warn('import screenshot 失败:', sh._id, e)
+        }
+      }
+
+      console.log('[FocusFlow] importAllData 完成:', imported, 'mode=', mode)
+      return { ok: true, imported, mode }
+    } catch (e) {
+      console.error('importAllData 失败:', e)
+      return { ok: false, message: String(e) }
+    }
+  }
+
   // 清空所有 focusflow 相关数据（截图、时间轴、月份索引；不含设置）
   // 使用 utools.db.allDocs(key前缀) 列出所有匹配文档
   window.clearAllData = () => {
     try {
       let removed = 0
-      const prefixes = ['screenshot/', 'timeslot/', 'month/']
+      // 清理所有 focusflow 业务数据：截图（含附件）、时间槽、月份索引、AI 日报告
+      // 注意：设置（focusflow-settings / settings/focusflow）不在此处清理
+      const prefixes = ['screenshot/', 'timeslot/', 'month/', 'dailyreport/']
       for (const prefix of prefixes) {
         try {
           const docs = utools.db.allDocs(prefix) || []
@@ -594,7 +840,7 @@ if (typeof utools !== 'undefined') {
           console.error('clearAllData allDocs 失败:', prefix, e)
         }
       }
-      console.log('[FocusFlow] clearAllData 已删除', removed, '个文档')
+      console.log('[FocusFlow] clearAllData 已删除', removed, '个文档（含 dailyreport）')
       return { ok: true, removed }
     } catch (e) {
       console.error('clearAllData 失败:', e)
@@ -688,6 +934,90 @@ if (typeof utools !== 'undefined') {
       return { ok: true, removed }
     } catch (e) {
       console.error('clearDateData 失败:', e)
+      return { ok: false, removed: 0, message: String(e) }
+    }
+  }
+
+  // 仅清理截图（保留 AI 总结：title/summary/categories/detail 与日报告）
+  // - scope='all'：删除所有 screenshot/ 文档与附件，并把所有 timeslot.screenshots 数组清空
+  // - scope='date'：删除该天范围内的 screenshot 与该天 timeslot.screenshots 引用
+  window.clearScreenshotsOnly = (options = {}) => {
+    try {
+      const scope = options.scope === 'date' ? 'date' : 'all'
+      const dateStr = options.dateStr || ''
+
+      let startOfDay = 0
+      let endOfDay = 0
+      let startSec = 0
+      let endSec = 0
+      if (scope === 'date') {
+        if (!dateStr) return { ok: false, removed: 0, message: '日期不能为空' }
+        const target = new Date(dateStr)
+        if (Number.isNaN(target.getTime())) {
+          return { ok: false, removed: 0, message: '日期格式不正确' }
+        }
+        startOfDay = new Date(target.getFullYear(), target.getMonth(), target.getDate(), 0, 0, 0, 0).getTime()
+        endOfDay = startOfDay + 24 * 60 * 60 * 1000 - 1
+        startSec = Math.floor(startOfDay / 1000)
+        endSec = Math.floor(endOfDay / 1000)
+      }
+
+      let removed = 0
+
+      // 1) 删除截图文档（含附件）
+      const removedShotIds = new Set()
+      try {
+        const shots = utools.db.allDocs('screenshot/') || []
+        for (const shot of shots) {
+          const id = shot._id || ''
+          let shouldRemove = scope === 'all'
+          if (scope === 'date') {
+            const ts = Number(id.replace('screenshot/', ''))
+            shouldRemove = Number.isFinite(ts) && ts >= startOfDay && ts <= endOfDay
+          }
+          if (shouldRemove) {
+            try {
+              utools.db.remove(shot._id)
+              removed++
+              removedShotIds.add(id)
+            } catch (e) {
+              console.error('clearScreenshotsOnly 删除 screenshot 失败:', shot._id, e)
+            }
+          }
+        }
+      } catch (e) {
+        console.error('clearScreenshotsOnly 读取 screenshot 失败:', e)
+      }
+
+      // 2) 同步把对应 timeslot 的 screenshots 数组清空（保留 title/summary/categories/detail）
+      try {
+        const slots = utools.db.allDocs('timeslot/') || []
+        for (const slot of slots) {
+          const id = slot._id || ''
+          let shouldUpdate = false
+          if (scope === 'all') {
+            shouldUpdate = Array.isArray(slot.screenshots) && slot.screenshots.length > 0
+          } else {
+            const sec = Number(id.replace('timeslot/', ''))
+            shouldUpdate = Number.isFinite(sec) && sec >= startSec && sec <= endSec &&
+              Array.isArray(slot.screenshots) && slot.screenshots.length > 0
+          }
+          if (shouldUpdate) {
+            try {
+              utools.db.put({ ...slot, screenshots: [] })
+            } catch (e) {
+              console.error('clearScreenshotsOnly 清空 timeslot.screenshots 失败:', slot._id, e)
+            }
+          }
+        }
+      } catch (e) {
+        console.error('clearScreenshotsOnly 读取 timeslot 失败:', e)
+      }
+
+      console.log('[FocusFlow] clearScreenshotsOnly', scope, dateStr, '已删除', removed, '张截图')
+      return { ok: true, removed }
+    } catch (e) {
+      console.error('clearScreenshotsOnly 失败:', e)
       return { ok: false, removed: 0, message: String(e) }
     }
   }
@@ -1083,6 +1413,117 @@ if (typeof utools !== 'undefined') {
     }
   }
 
+  // 开发环境：export/import（不含截图，dev 环境本来就是 mock 图）
+  window.exportAllData = async (options = {}) => {
+    try {
+      const payload = {
+        meta: { app: 'focusflow', version: 1, exportedAt: Date.now(), includeScreenshots: false },
+        timeslots: [],
+        months: [],
+        reports: [],
+        screenshots: []
+      }
+      for (let i = 0; i < localStorage.length; i++) {
+        const key = localStorage.key(i)
+        if (!key || !key.startsWith(DB_PREFIX)) continue
+        const id = key.slice(DB_PREFIX.length)
+        let doc = null
+        try { doc = JSON.parse(localStorage.getItem(key) || 'null') } catch (e) {}
+        if (!doc) continue
+        if (id.startsWith('timeslot/')) {
+          payload.timeslots.push({
+            _id: id,
+            title: doc.title || '',
+            summary: doc.summary || '',
+            detail: doc.detail || '',
+            categories: doc.categories || [],
+            time: doc.time || '',
+            screenshots: doc.screenshots || []
+          })
+        } else if (id.startsWith('month/')) {
+          payload.months.push({ _id: id, dates: doc.dates || [] })
+        } else if (id.startsWith('dailyreport/')) {
+          payload.reports.push({
+            _id: id,
+            content: doc.content || '',
+            model: doc.model || '',
+            generatedAt: doc.generatedAt || 0,
+            slotCount: doc.slotCount || 0,
+            stats: doc.stats || null
+          })
+        }
+      }
+      return payload
+    } catch (e) {
+      return null
+    }
+  }
+
+  window.importAllData = async (payload, options = {}) => {
+    try {
+      if (!payload || payload.meta?.app !== 'focusflow') {
+        return { ok: false, message: '文件格式不正确（不是 FocusFlow 导出包）' }
+      }
+      const mode = options.mode === 'overwrite' ? 'overwrite' : 'merge'
+      let imported = { timeslots: 0, months: 0, reports: 0, screenshots: 0 }
+      if (mode === 'overwrite') {
+        const toRemove = []
+        for (let i = 0; i < localStorage.length; i++) {
+          const key = localStorage.key(i)
+          if (
+            key &&
+            (key.startsWith(DB_PREFIX + 'timeslot/') ||
+              key.startsWith(DB_PREFIX + 'month/') ||
+              key.startsWith(DB_PREFIX + 'dailyreport/'))
+          ) {
+            toRemove.push(key)
+          }
+        }
+        toRemove.forEach((k) => localStorage.removeItem(k))
+      }
+      for (const s of (payload.timeslots || [])) {
+        if (!s || !s._id) continue
+        mockPut({
+          _id: s._id,
+          title: s.title || '',
+          summary: s.summary || '',
+          detail: s.detail || '',
+          categories: s.categories || [],
+          time: s.time || '',
+          screenshots: s.screenshots || []
+        })
+        imported.timeslots++
+      }
+      for (const m of (payload.months || [])) {
+        if (!m || !m._id) continue
+        let dates = Array.isArray(m.dates) ? m.dates.slice() : []
+        if (mode === 'merge') {
+          const cur = mockGet(m._id)
+          if (cur && Array.isArray(cur.dates)) {
+            dates = Array.from(new Set([...cur.dates, ...dates])).sort((a, b) => a - b)
+          }
+        }
+        mockPut({ _id: m._id, dates })
+        imported.months++
+      }
+      for (const r of (payload.reports || [])) {
+        if (!r || !r._id) continue
+        mockPut({
+          _id: r._id,
+          content: r.content || '',
+          model: r.model || '',
+          generatedAt: r.generatedAt || 0,
+          slotCount: r.slotCount || 0,
+          stats: r.stats || null
+        })
+        imported.reports++
+      }
+      return { ok: true, imported, mode }
+    } catch (e) {
+      return { ok: false, message: String(e) }
+    }
+  }
+
   window.clearAllData = () => {
     try {
       const keysToRemove = []
@@ -1093,6 +1534,7 @@ if (typeof utools !== 'undefined') {
           (key.startsWith(DB_PREFIX + 'screenshot/') ||
             key.startsWith(DB_PREFIX + 'timeslot/') ||
             key.startsWith(DB_PREFIX + 'month/') ||
+            key.startsWith(DB_PREFIX + 'dailyreport/') ||
             key.startsWith(ATTACH_PREFIX + 'screenshot/'))
         ) {
           keysToRemove.push(key)
@@ -1184,6 +1626,80 @@ if (typeof utools !== 'undefined') {
       return { ok: true, removed }
     } catch (e) {
       console.error('dev clearDateData 失败:', e)
+      return { ok: false, removed: 0, message: String(e) }
+    }
+  }
+
+  // 开发环境：仅清截图（保留 timeslot 上的 AI 总结字段）
+  window.clearScreenshotsOnly = (options = {}) => {
+    try {
+      const scope = options.scope === 'date' ? 'date' : 'all'
+      const dateStr = options.dateStr || ''
+      let startOfDay = 0
+      let endOfDay = 0
+      let startSec = 0
+      let endSec = 0
+      if (scope === 'date') {
+        if (!dateStr) return { ok: false, removed: 0, message: '日期不能为空' }
+        const target = new Date(dateStr)
+        if (Number.isNaN(target.getTime())) {
+          return { ok: false, removed: 0, message: '日期格式不正确' }
+        }
+        startOfDay = new Date(target.getFullYear(), target.getMonth(), target.getDate(), 0, 0, 0, 0).getTime()
+        endOfDay = startOfDay + 24 * 60 * 60 * 1000 - 1
+        startSec = Math.floor(startOfDay / 1000)
+        endSec = Math.floor(endOfDay / 1000)
+      }
+
+      let removed = 0
+      const removeKeys = []
+      const slotsToUpdate = []
+
+      for (let i = 0; i < localStorage.length; i++) {
+        const key = localStorage.key(i)
+        if (!key) continue
+        if (key.startsWith(DB_PREFIX + 'screenshot/')) {
+          let inScope = scope === 'all'
+          if (scope === 'date') {
+            const ts = Number(key.replace(DB_PREFIX + 'screenshot/', ''))
+            inScope = Number.isFinite(ts) && ts >= startOfDay && ts <= endOfDay
+          }
+          if (inScope) {
+            removeKeys.push(key)
+            removeKeys.push(ATTACH_PREFIX + key.replace(DB_PREFIX, ''))
+          }
+        } else if (key.startsWith(DB_PREFIX + 'timeslot/')) {
+          let inScope = scope === 'all'
+          if (scope === 'date') {
+            const sec = Number(key.replace(DB_PREFIX + 'timeslot/', ''))
+            inScope = Number.isFinite(sec) && sec >= startSec && sec <= endSec
+          }
+          if (inScope) {
+            try {
+              const slot = JSON.parse(localStorage.getItem(key) || '{}')
+              if (Array.isArray(slot.screenshots) && slot.screenshots.length > 0) {
+                slotsToUpdate.push({ key, slot })
+              }
+            } catch (e) {}
+          }
+        }
+      }
+
+      Array.from(new Set(removeKeys)).forEach((k) => {
+        if (localStorage.getItem(k) !== null) {
+          localStorage.removeItem(k)
+          removed++
+        }
+      })
+      slotsToUpdate.forEach(({ key, slot }) => {
+        try {
+          localStorage.setItem(key, JSON.stringify({ ...slot, screenshots: [] }))
+        } catch (e) {}
+      })
+
+      return { ok: true, removed }
+    } catch (e) {
+      console.error('dev clearScreenshotsOnly 失败:', e)
       return { ok: false, removed: 0, message: String(e) }
     }
   }
