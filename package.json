@@ -3,6 +3,16 @@
   "version": "1.0.0",
   "description": "uTools 插件 - 电脑活动追踪和AI总结",
   "main": "dist/index.html",
+  "author": "progressmen",
+  "license": "MIT",
+  "homepage": "https://github.com/progressmen/focusflow",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/progressmen/focusflow.git"
+  },
+  "bugs": {
+    "url": "https://github.com/progressmen/focusflow/issues"
+  },
   "scripts": {
     "dev": "vite",
     "build": "vite build",

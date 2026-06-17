@@ -260,11 +260,13 @@
         <h3>关于</h3>
         <div class="about-info">
           <p><strong>版本:</strong> 1.0.0</p>
-          <p><strong>开发者:</strong> Your Name</p>
+          <p><strong>开发者:</strong> progressmen</p>
           <p><strong>描述:</strong> 智能电脑活动追踪和AI总结工具</p>
-          <p>
-            <a href="#" @click.prevent="openHomepage">项目主页</a> |
-            <a href="#" @click.prevent="reportIssue">反馈问题</a>
+          <p><strong>项目地址:</strong>
+            <a href="#" @click.prevent="openHomepage">github.com/progressmen/focusflow</a>
+          </p>
+          <p><strong>问题反馈:</strong>
+            <a href="#" @click.prevent="reportIssue">github.com/progressmen/focusflow/issues</a>
           </p>
         </div>
       </div>
@@ -922,14 +924,20 @@ const confirmClear = async () => {
 }
 
 const openHomepage = () => {
-  if (utools) {
-    utools.shellOpenExternal('https://github.com/yourname/focusflow')
+  const url = 'https://github.com/progressmen/focusflow'
+  if (typeof utools !== 'undefined' && typeof utools.shellOpenExternal === 'function') {
+    utools.shellOpenExternal(url)
+  } else {
+    window.open(url, '_blank', 'noopener')
   }
 }
 
 const reportIssue = () => {
-  if (utools) {
-    utools.shellOpenExternal('https://github.com/yourname/focusflow/issues')
+  const url = 'https://github.com/progressmen/focusflow/issues'
+  if (typeof utools !== 'undefined' && typeof utools.shellOpenExternal === 'function') {
+    utools.shellOpenExternal(url)
+  } else {
+    window.open(url, '_blank', 'noopener')
   }
 }
 
