@@ -888,17 +888,83 @@ function stripCodeFence(text) {
   return raw
 }
 
-// 从 AI 返回的文本中提取 JSON（容错：可能带 ```json ... ``` 围栏）
+// 去除推理类模型的思考块（<think>...</think>，多见于 DeepSeek-R1、Kimi-Thinking 等）
+function stripThinkBlocks(text) {
+  if (!text) return ''
+  // 同时处理闭合 / 未闭合 的 <think>
+  return String(text)
+    .replace(/<think>[\s\S]*?<\/think>/gi, '')
+    .replace(/<think>[\s\S]*$/gi, '')
+    .trim()
+}
+
+// 提取最后一个「平衡」的 JSON 对象（处理嵌套花括号）
+function extractLastJsonObject(text) {
+  if (!text) return ''
+  const s = String(text)
+  // 优先尝试代码块内的 ```json ... ``` 或 ``` ... ``` —— 取最后一个匹配
+  const fenceRegex = /```(?:json)?\s*([\s\S]*?)```/gi
+  let lastFence = null
+  let m
+  while ((m = fenceRegex.exec(s)) !== null) {
+    lastFence = m[1]
+  }
+  if (lastFence) {
+    const balanced = balancedJsonFromString(lastFence)
+    if (balanced) return balanced
+  }
+  // 否则在原文里反向找最后一个 } 的成对 {（容错性最高）
+  return balancedJsonFromString(s) || ''
+}
+
+// 从字符串中提取「最后一个起点 -> 最近一个能形成平衡花括号」的 JSON 子串
+function balancedJsonFromString(s) {
+  if (!s) return ''
+  const text = String(s)
+  // 找到所有 '{' 起点，从「最后一个」往前尝试，找到第一个能平衡到末尾的就返回
+  const starts = []
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] === '{') starts.push(i)
+  }
+  for (let k = starts.length - 1; k >= 0; k--) {
+    const start = starts[k]
+    let depth = 0
+    let inStr = false
+    let esc = false
+    for (let i = start; i < text.length; i++) {
+      const ch = text[i]
+      if (inStr) {
+        if (esc) { esc = false; continue }
+        if (ch === '\\') { esc = true; continue }
+        if (ch === '"') inStr = false
+        continue
+      }
+      if (ch === '"') { inStr = true; continue }
+      if (ch === '{') depth++
+      else if (ch === '}') {
+        depth--
+        if (depth === 0) {
+          return text.slice(start, i + 1)
+        }
+      }
+    }
+  }
+  return ''
+}
+
+// 从 AI 返回的文本中提取 JSON（容错：可能带 ```json ... ``` 围栏 / <think> 推理段）
 function parseAnalysisJson(text) {
   if (!text) return { title: '', summary: '', detail: '', categories: [] }
-  let raw = text.trim()
-  // 去除可能的 markdown 代码块围栏
-  raw = raw.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim()
-  // 提取第一个 { ... }
-  const m = raw.match(/\{[\s\S]*\}/)
-  if (m) raw = m[0]
+  // 1. 先剥离 <think>...</think> 推理段
+  const cleaned = stripThinkBlocks(text)
+  // 2. 提取代码块内 / 文本末尾的最后一个平衡 JSON 对象
+  const jsonStr = extractLastJsonObject(cleaned)
+  if (!jsonStr) {
+    console.warn('[FocusFlow] parseAnalysisJson 找不到 JSON，原文：', text)
+    return { title: '', summary: cleaned.slice(0, 80), detail: cleaned, categories: [] }
+  }
   try {
-    const obj = JSON.parse(raw)
+    const obj = JSON.parse(jsonStr)
     return {
       title: String(obj.title || '').trim(),
       summary: String(obj.summary || '').trim(),
@@ -906,7 +972,7 @@ function parseAnalysisJson(text) {
       categories: Array.isArray(obj.categories) ? obj.categories.filter(Boolean).map(String) : []
     }
   } catch (e) {
-    console.error('parseAnalysisJson 失败:', e, '原文：', text)
+    console.error('parseAnalysisJson 失败:', e, '抽取的 JSON：', jsonStr, '原文：', text)
     return { title: '', summary: text.slice(0, 80), detail: text, categories: [] }
   }
 }
@@ -938,19 +1004,40 @@ async function callOpenAICompatChat(provider, messages, extraBody = {}) {
   // 本地模型 apiKey 可为空；非空才带 Authorization
   if (provider.apiKey) headers['Authorization'] = `Bearer ${provider.apiKey}`
 
-  let response
-  try {
-    response = await fetch(url, {
+  // 抽出 responseFormat 单独处理（部分服务不支持 response_format，需 graceful fallback）
+  const { responseFormat, ...bodyExtra } = extraBody || {}
+  const baseBody = {
+    model: provider.model,
+    messages,
+    max_tokens: 1000,
+    temperature: 0.4,
+    ...bodyExtra
+  }
+
+  async function sendOnce(includeResponseFormat) {
+    const body = { ...baseBody }
+    if (includeResponseFormat && responseFormat) {
+      body.response_format = { type: responseFormat }
+    }
+    const resp = await fetch(url, {
       method: 'POST',
       headers,
-      body: JSON.stringify({
-        model: provider.model,
-        messages,
-        max_tokens: 1000,
-        temperature: 0.4,
-        ...extraBody
-      })
+      body: JSON.stringify(body)
     })
+    return resp
+  }
+
+  let response
+  try {
+    response = await sendOnce(true)
+    // 某些服务（如旧版 Ollama / vLLM、MiniMax、豆包）不支持 response_format，会返回 4xx → 回退
+    if (!response.ok && responseFormat) {
+      const status = response.status
+      if (status === 400 || status === 422 || status === 415) {
+        console.warn(`[FocusFlow] ${provider.name || provider.id} 不支持 response_format，回退重试`)
+        response = await sendOnce(false)
+      }
+    }
   } catch (e) {
     throw new Error(`网络请求失败（${provider.name || provider.id}）：${(e && e.message) || e}`)
   }
@@ -1022,8 +1109,9 @@ function buildVisionMessages(screenshots, instructionText) {
 
 /**
  * Claude SDK 调用（图片）
+ * @param {string} systemOverride 可选 system prompt（覆盖默认）
  */
-async function callClaudeVision(provider, screenshots, instructionText) {
+async function callClaudeVision(provider, screenshots, instructionText, systemOverride) {
   const client = new Anthropic({ apiKey: provider.apiKey, dangerouslyAllowBrowser: true })
   const content = []
   let skipped = 0
@@ -1046,7 +1134,8 @@ async function callClaudeVision(provider, screenshots, instructionText) {
     model: provider.model,
     max_tokens: 1000,
     temperature: 0.4,
-    system: '你是一名严谨的活动分析助理，必须严格按照指定的 JSON 格式输出，不要输出 JSON 之外的任何文字。',
+    system: systemOverride ||
+      '你是一名严谨的活动分析助理，必须严格按照指定的 JSON 格式输出，不要输出 JSON 之外的任何文字，不要输出 <think> 推理过程。',
     messages: [{ role: 'user', content }]
   })
   const text = (response?.content || []).map((c) => (c?.text || '')).join('').trim()
@@ -1113,7 +1202,13 @@ AIService.prototype.analyzeTimeslotByProvider = async function (provider, args) 
       ? `4. 用户配置的兜底分类是「${defaultCategory}」，但仅当 1~3 条都判定不出时才能使用，不要轻易回退。`
       : '',
     '',
-    '请严格按照下面的 JSON 格式输出，不要输出 JSON 之外的任何文字：',
+    '【输出格式 — 严格遵守】',
+    '- 只输出一个合法 JSON 对象，不要输出任何其他文字',
+    '- 不要输出 <think>...</think> 等任何思考标签或推理过程',
+    '- 不要使用 ```json 或 ``` 包裹',
+    '- 不要在 JSON 前后加解释、备注、问候、签名',
+    '- 字段必须完整，缺失字段请填空字符串或空数组',
+    '',
     '{',
     '  "title": "10 个字以内的本时段标题",',
     '  "summary": "30~80 字的本时段活动摘要",',
@@ -1122,18 +1217,33 @@ AIService.prototype.analyzeTimeslotByProvider = async function (provider, args) 
     '}'
   ].filter(Boolean).join('\n')
 
+  // 系统级约束（OpenAI 兼容 / Claude 都支持），进一步降低非 JSON 输出概率
+  const systemPrompt =
+    '你是一个严格的活动分析助手，必须只用 JSON 回应。' +
+    '禁止输出 <think> 推理标签、禁止用 ``` 包裹、禁止在 JSON 前后添加任何说明文字。' +
+    '若你内部需要思考，请只在心里进行，最终回答必须是单个合法 JSON 对象。'
+
   let text = ''
   if (provider.protocol === 'claude') {
-    text = await callClaudeVision(provider, sample, instructionText)
+    text = await callClaudeVision(provider, sample, instructionText, systemPrompt)
   } else {
     if (!provider.vision) {
       // 不支持图片的模型，仍可基于元数据让它分析
       const fallback = `（注：当前模型不支持图片，仅基于元数据分析）\n\n${instructionText}`
-      text = await callOpenAICompatChat(provider, [{ role: 'user', content: fallback }])
+      text = await callOpenAICompatChat(
+        provider,
+        [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: fallback }
+        ],
+        { responseFormat: 'json_object' }
+      )
     } else {
       const messages = buildVisionMessages(sample, instructionText)
       if (!messages) throw new Error(`没有有效的截图可传给 ${provider.name || provider.id}`)
-      text = await callOpenAICompatChat(provider, messages)
+      // 在 vision messages 前面再插入 system
+      messages.unshift({ role: 'system', content: systemPrompt })
+      text = await callOpenAICompatChat(provider, messages, { responseFormat: 'json_object' })
     }
   }
   if (!text) throw new Error('AI 返回了空内容')
