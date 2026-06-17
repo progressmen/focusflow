@@ -85,9 +85,9 @@ focusflow/
   },
   "features": [
     {
-      "code": "activity-tracker",
-      "explain": "活动追踪器",
-      "cmds": ["activity", "活动追踪", "使用统计"]
+      "code": "focusflow",
+      "explain": "打开 FocusFlow 主页",
+      "cmds": ["focusFlow"]
     }
   ]
 }

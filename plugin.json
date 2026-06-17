@@ -5,17 +5,15 @@
   "logo": "assets/logo.png",
   "main": "index.html",
   "version": "1.0.0",
-  "author": "zhaoqi",
-  "homepage": "",
+  "author": "progressmen",
+  "homepage": "https://github.com/progressmen/focusflow",
   "preload": "preload.js",
   "features": [
     {
-      "code": "activity-tracker",
-      "explain": "活动追踪器",
+      "code": "focusflow",
+      "explain": "打开 FocusFlow 主页",
       "cmds": [
-        "activity",
-        "活动追踪",
-        "使用统计"
+        "focusFlow"
       ]
     }
   ]
