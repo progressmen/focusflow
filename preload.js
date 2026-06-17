@@ -10,6 +10,17 @@ function getRoundedSeconds(time = Date.now()) {
   return Math.floor(time / (10 * 60 * 1000)) * (10 * 60)
 }
 
+// 格式化 10 分钟时段：roundedSeconds → "HH:mm - HH:mm"（结束时间为开始时间向后 10 分钟）
+function formatTimeslotRange(roundedSeconds) {
+  const d = new Date(roundedSeconds * 1000)
+  const hh = String(d.getHours()).padStart(2, '0')
+  const mm = String(d.getMinutes()).padStart(2, '0')
+  const end = new Date(roundedSeconds * 1000 + 10 * 60 * 1000)
+  const eh = String(end.getHours()).padStart(2, '0')
+  const em = String(end.getMinutes()).padStart(2, '0')
+  return `${hh}:${mm} - ${eh}:${em}`
+}
+
 // base64 data URL → Uint8Array（用于上传附件）
 function dataUrlToUint8Array(dataUrl) {
   const commaIdx = dataUrl.indexOf(',')
@@ -335,7 +346,8 @@ if (typeof utools !== 'undefined') {
           categories: cur.categories || [],
           summary: cur.summary || '',
           detail: cur.detail || '',
-          time: cur.time || new Date(rounded * 1000).toLocaleString(),
+          // 时段固定显示为 "HH:mm - HH:mm"（开始时间 + 10 分钟）
+          time: formatTimeslotRange(rounded),
           screenshots
         }
         if (cur._rev) timeslotDoc._rev = cur._rev
@@ -470,7 +482,8 @@ if (typeof utools !== 'undefined') {
         categories: (data && data.categories) || cur.categories || [],
         summary: (data && data.summary) || cur.summary || '',
         detail: (data && data.detail) || cur.detail || '',
-        time: (data && data.time) || cur.time || new Date(roundedSeconds * 1000).toLocaleString(),
+        // 时段固定为 "HH:mm - HH:mm"（开始时间 + 10 分钟），忽略调用方传入的 time
+        time: formatTimeslotRange(roundedSeconds),
         screenshots: (data && data.screenshots) || cur.screenshots || []
       }
       if (cur._rev) doc._rev = cur._rev
@@ -1244,7 +1257,8 @@ if (typeof utools !== 'undefined') {
         categories: cur.categories || [],
         summary: cur.summary || '',
         detail: cur.detail || '',
-        time: cur.time || new Date(rounded * 1000).toLocaleString(),
+        // 时段固定显示为 "HH:mm - HH:mm"
+        time: formatTimeslotRange(rounded),
         screenshots
       })
 
@@ -1331,7 +1345,8 @@ if (typeof utools !== 'undefined') {
         categories: (data && data.categories) || cur.categories || [],
         summary: (data && data.summary) || cur.summary || '',
         detail: (data && data.detail) || cur.detail || '',
-        time: (data && data.time) || cur.time || new Date(roundedSeconds * 1000).toLocaleString(),
+        // 时段固定为 "HH:mm - HH:mm"
+        time: formatTimeslotRange(roundedSeconds),
         screenshots: (data && data.screenshots) || cur.screenshots || []
       }
       return !!mockPut(doc).ok

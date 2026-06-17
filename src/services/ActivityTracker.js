@@ -308,7 +308,7 @@ export class ActivityTracker {
         try {
           const img = window.getScreenshotFromDb ? await window.getScreenshotFromDb(s.docId) : null
           if (img) {
-            screenshots.push({ imageData: img, app: s.app, time: s.time })
+            screenshots.push({ imageData: img, app: s.app, time: s.time, timestamp: s.timestamp })
           } else {
             failedDocs.push(s.docId)
           }
@@ -326,7 +326,7 @@ export class ActivityTracker {
         console.warn('[FocusFlow] 部分截图加载失败：', failedDocs)
       }
 
-      const timeLabel = slot.time || formatTimeslot(roundedSec)
+      const timeLabel = formatTimeslot(roundedSec)
       const categories = Array.isArray(settings.categories) ? settings.categories : []
       if (categories.length === 0) {
         console.warn('[FocusFlow] 未配置任何分类，AI 可能无法准确归类')
@@ -420,9 +420,11 @@ export class ActivityTracker {
       const id = slot._id
         ? Number(String(slot._id).replace('timeslot/', ''))
         : null
+      // 时段时间固定显示为 "HH:mm - HH:mm"（基于 id 现场计算，忽略 db 中可能的旧格式如 toLocaleString）
+      const timeRange = id ? formatTimeslot(id) : (slot.time || '')
       slots.push({
         id: id,
-        time: slot.time || (id ? formatTimeslot(id) : ''),
+        time: timeRange,
         title: slot.title || '',
         categories: slot.categories || [],
         summary: slot.summary || '',

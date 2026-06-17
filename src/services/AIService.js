@@ -968,12 +968,51 @@ async function callOpenAICompatChat(provider, messages, extraBody = {}) {
 }
 
 /**
+ * 从截图的 time 字段提取 HH:mm:ss（time 形如 "YYYY-MM-DD HH:mm:ss"）
+ * fallback：基于 timestamp 计算
+ */
+function extractClockTime(s) {
+  if (s && typeof s.time === 'string') {
+    const m = s.time.match(/(\d{1,2}:\d{2}(?::\d{2})?)$/)
+    if (m) return m[1]
+  }
+  if (s && typeof s.timestamp === 'number') {
+    const d = new Date(s.timestamp)
+    return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}`
+  }
+  return ''
+}
+
+/**
+ * 构建「截图时间轴」文本（按时间排序）
+ *   1. 14:13:27 [Chrome]
+ *   2. 14:15:02 [VSCode]
+ *   3. 14:18:51 [Slack]
+ */
+function buildScreenshotTimeline(screenshots) {
+  const items = (screenshots || [])
+    .map((s, i) => ({
+      idx: i + 1,
+      time: extractClockTime(s),
+      app: s.app || '未知应用'
+    }))
+    .filter((x) => x.time)
+  if (items.length === 0) return ''
+  return items.map((x) => `  ${x.idx}. ${x.time} [${x.app}]`).join('\n')
+}
+
+/**
  * 把图片+文本组装成多模态 messages（OpenAI 兼容格式）
+ * 每张图片前插入一段时间/应用标注，让模型理解时序
  */
 function buildVisionMessages(screenshots, instructionText) {
   const content = []
-  for (const s of screenshots) {
+  for (let i = 0; i < screenshots.length; i++) {
+    const s = screenshots[i]
     if (!s.imageData) continue
+    const clock = extractClockTime(s)
+    const label = `第 ${i + 1} 张截图 · 时间 ${clock || '未知'} · 应用 ${s.app || '未知'}`
+    content.push({ type: 'text', text: label })
     content.push({ type: 'image_url', image_url: { url: s.imageData } })
   }
   if (content.length === 0) return null
@@ -988,11 +1027,15 @@ async function callClaudeVision(provider, screenshots, instructionText) {
   const client = new Anthropic({ apiKey: provider.apiKey, dangerouslyAllowBrowser: true })
   const content = []
   let skipped = 0
-  for (const s of screenshots) {
+  for (let i = 0; i < screenshots.length; i++) {
+    const s = screenshots[i]
     const parsed = parseDataUrl(s.imageData)
     if (!parsed) { skipped++; continue }
     let mime = parsed.mime || 'image/png'
     if (!/^image\/(jpeg|png|gif|webp)$/i.test(mime)) mime = 'image/png'
+    const clock = extractClockTime(s)
+    const label = `第 ${i + 1} 张截图 · 时间 ${clock || '未知'} · 应用 ${s.app || '未知'}`
+    content.push({ type: 'text', text: label })
     content.push({ type: 'image', source: { type: 'base64', media_type: mime, data: parsed.base64 } })
   }
   if (content.length === 0) {
@@ -1048,11 +1091,13 @@ AIService.prototype.analyzeTimeslotByProvider = async function (provider, args) 
   const sample = pickSampleScreenshots(screenshots, 4)
   const catLines = (categories || []).map((c) => `- ${c.name}：${c.description || ''}`).join('\n')
   const appList = Array.from(new Set(sample.map((s) => s.app).filter(Boolean))).join('、')
+  const timeline = buildScreenshotTimeline(sample)
 
   const instructionText = [
     `你是一名个人活动分析师。请基于下列截图和元数据，判断用户在时段「${timeLabel}」内做了什么，并将其归类到给定的分类中。`,
     '',
     `本时段涉及的应用：${appList || '未知'}`,
+    timeline ? `\n本时段截图时间轴（共 ${sample.length} 张，已按时间顺序排列）：\n${timeline}` : '',
     '',
     '可用分类（请只能从中选择，可以选多个相关分类）：',
     catLines || '（未配置分类，请使用 "未分类"）',
@@ -1062,7 +1107,7 @@ AIService.prototype.analyzeTimeslotByProvider = async function (provider, args) 
     '{',
     '  "title": "10 个字以内的本时段标题",',
     '  "summary": "30~80 字的本时段活动摘要",',
-    '  "detail": "100~200 字的详细描述，包括看到了什么、可能在做什么",',
+    '  "detail": "150~250 字的详细描述。请按截图时间轴顺序还原过程：例如「14:13 在 Chrome 浏览 X，14:15 切到 VSCode 编辑 Y，14:18 在 Slack 回复 Z」，体现出每个时间点对应的具体内容与场景切换",',
     '  "categories": ["分类名1", "分类名2"]',
     '}'
   ].filter(Boolean).join('\n')
