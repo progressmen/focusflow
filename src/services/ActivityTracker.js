@@ -332,7 +332,8 @@ export class ActivityTracker {
         console.warn('[FocusFlow] 未配置任何分类，AI 可能无法准确归类')
       }
       console.log('[FocusFlow] analyzeSlot：调用 AI', {
-        model,
+        provider: provider.id,
+        model: provider.model,
         roundedSec,
         images: screenshots.length,
         categories: categories.map((c) => c.name),

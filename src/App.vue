@@ -940,13 +940,20 @@ async function onAnalysisStateChange(payload) {
 async function reanalyzeSlot(item) {
   if (!item || item.id == null) return
   if (analyzingSlotIds.value.has(item.id)) return
-  // 检查 AI 是否已配置
+  // 检查 AI 是否已配置（v2: 用 active provider）
   try {
-    const settings = settingsService.loadSettings()
-    const model = settings.aiModel || ''
-    const apiKey = (settings.apiKeys && settings.apiKeys[model]) || ''
-    if (!model || !apiKey) {
-      window.alert('请先在「设置 → AI 模型」中配置 AI 模型和对应的 API Key')
+    settingsService.loadProviders()
+    const provider = settingsService.loadActiveProvider()
+    if (!provider) {
+      window.alert('请先在「设置 → AI 模型」中添加并激活一个模型')
+      return
+    }
+    if (!provider.model) {
+      window.alert(`「${provider.name || provider.id}」未指定模型 ID，请前往「设置 → AI 模型」编辑`)
+      return
+    }
+    if (provider.protocol === 'claude' && !provider.apiKey) {
+      window.alert(`「${provider.name || provider.id}」需要 API Key，请前往「设置 → AI 模型」补全`)
       return
     }
   } catch (e) {

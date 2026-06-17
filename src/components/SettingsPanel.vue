@@ -749,15 +749,14 @@ const loadSettings = () => {
 }
 
 const saveSettingsHandler = () => {
-  // 必须基于「db 中的完整 settings」进行合并，否则会把 apiKeys/categories 等字段抹掉
+  // 必须基于「db 中的完整 settings」进行合并，否则会把 providers/categories 等字段抹掉
   const full = settingsService.loadSettings() || {}
   const merged = {
     ...full,
     autoStart: settings.autoStart,
     notifications: settings.notifications,
     screenshotInterval: settings.screenshotInterval,
-    defaultCategory: settings.defaultCategory,
-    aiModel: settings.aiModel
+    defaultCategory: settings.defaultCategory
   }
   // 兜底清掉 PouchDB 元字段（service 层也会再剥一次）
   delete merged._id
