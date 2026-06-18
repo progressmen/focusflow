@@ -883,7 +883,7 @@ async function analyzeAllPending() {
     for (const s of pending) {
       try {
         markAnalyzing(s.id, true)
-        const r = await activityTracker.analyzeSlot(s.id)
+        const r = await activityTracker.analyzeSlot(s.id, { source: 'batch' })
         if (r && r.categories && r.categories.length) ok++
         else fail++
       } catch (e) {
@@ -961,7 +961,7 @@ async function reanalyzeSlot(item) {
   }
   markAnalyzing(item.id, true)
   try {
-    const result = await activityTracker.analyzeSlot(item.id)
+    const result = await activityTracker.analyzeSlot(item.id, { source: 'manual' })
     if (result) {
       window.utools?.showNotification?.(`已分析：${result.title || '时段'}`)
       // 局部更新 timelineData 中的对应项（避免整页刷新闪烁）

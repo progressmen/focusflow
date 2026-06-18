@@ -253,7 +253,7 @@ export class ActivityTracker {
       if (slot.title && slot.summary && Array.isArray(slot.categories) && slot.categories.length > 0) return
 
       try {
-        await this.analyzeSlot(prevSlotSec)
+        await this.analyzeSlot(prevSlotSec, { source: 'auto' })
       } catch (e) {
         // 自动触发的 AI 分析失败不打扰用户，只在控制台留痕
         console.warn('[FocusFlow] 自动 AI 分析跳过：', e && e.message)
@@ -267,13 +267,15 @@ export class ActivityTracker {
    * 显式分析某个时间槽（可在 UI 中手动触发）
    * 失败时抛出带原因的 Error，便于 UI 展示
    */
-  async analyzeSlot(roundedSec) {
+  async analyzeSlot(roundedSec, opts = {}) {
     const id = Number(roundedSec)
+    const source = opts.source || 'unknown'
     // 并发互斥：同一时段不重入（自动触发 + 用户手动点击 可能并发）
     if (this._analyzingSlots.has(id)) {
-      console.log('[FocusFlow] analyzeSlot 跳过：已有分析在进行', id)
+      console.log('[FocusFlow] analyzeSlot 跳过：已有分析在进行', id, 'source=', source)
       return null
     }
+    console.log('[FocusFlow] analyzeSlot 开始 id=', id, 'source=', source)
     this._analyzingSlots.add(id)
     this._emitState({ id, analyzing: true })
 
@@ -353,9 +355,9 @@ export class ActivityTracker {
         throw new Error(`AI 调用失败：${(e && e.message) || e}`)
       }
 
-      if (!result || (!result.title && !result.summary && (!result.categories || result.categories.length === 0))) {
-        console.error('[FocusFlow] AI 返回空结果或无法解析:', result)
-        throw new Error('AI 返回结果为空或无法解析，请检查模型是否支持图片、或控制台日志')
+      if (!result || result._parseFailed || (!result.title && !result.summary && (!result.categories || result.categories.length === 0))) {
+        console.error('[FocusFlow] AI 返回空结果或无法解析，已跳过写库:', result)
+        throw new Error('AI 返回结果不是合法 JSON，已阻止写入时间轴。请查看控制台中的 [FocusFlow][AI] 原始输出日志，或更换非推理模型/关闭思考输出。')
       }
 
       // 写回 timeslot 文档

@@ -1048,7 +1048,11 @@ async function callOpenAICompatChat(provider, messages, extraBody = {}) {
       err.base_resp?.status_msg ||
       err.message ||
       `HTTP ${response.status}`
-    throw new Error(`${provider.name || provider.id} API ${response.status}：${msg}`)
+    const apiError = new Error(`${provider.name || provider.id} API ${response.status}：${msg}`)
+    apiError.status = response.status
+    apiError.errorBody = err
+    apiError.provider = provider.id
+    throw apiError
   }
   const data = await response.json()
   return data?.choices?.[0]?.message?.content || ''
@@ -1105,6 +1109,54 @@ function buildVisionMessages(screenshots, instructionText) {
   if (content.length === 0) return null
   content.push({ type: 'text', text: instructionText })
   return [{ role: 'user', content }]
+}
+
+function extractSensitiveContentIndex(error) {
+  const msg = [
+    error?.message,
+    error?.errorBody?.error?.message,
+    error?.errorBody?.message
+  ].filter(Boolean).join('\n')
+  if (!/sensitive|new_sensitive|input.*sensitive/i.test(msg)) return -1
+  const m = msg.match(/content\[(\d+)\]/i)
+  return m ? Number(m[1]) : -1
+}
+
+function contentIndexToScreenshotIndex(contentIndex) {
+  if (!Number.isFinite(contentIndex)) return -1
+  if (contentIndex < 1 || contentIndex % 2 !== 1) return -1
+  return Math.floor((contentIndex - 1) / 2)
+}
+
+async function callVisionWithSensitiveRetry(provider, screenshots, instructionText, systemPrompt) {
+  let remaining = screenshots.slice()
+  const skipped = []
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const messages = buildVisionMessages(remaining, instructionText)
+    if (!messages) {
+      const detail = skipped.length ? `（已跳过 ${skipped.length} 张被模型安全策略拒绝的截图）` : ''
+      throw new Error(`没有可分析的有效截图${detail}`)
+    }
+    messages.unshift({ role: 'system', content: systemPrompt })
+    try {
+      const text = await callOpenAICompatChat(provider, messages, { responseFormat: 'json_object' })
+      return { text, skippedSensitive: skipped }
+    } catch (e) {
+      const contentIndex = extractSensitiveContentIndex(e)
+      const screenshotIndex = contentIndexToScreenshotIndex(contentIndex)
+      if (screenshotIndex < 0 || screenshotIndex >= remaining.length) throw e
+      const bad = remaining[screenshotIndex]
+      skipped.push({
+        index: screenshotIndex + 1,
+        time: extractClockTime(bad),
+        app: bad.app || '未知应用',
+        message: e.message
+      })
+      console.warn('[FocusFlow][AI] 图片被模型安全策略拒绝，已跳过后重试：', skipped[skipped.length - 1])
+      remaining = remaining.filter((_, i) => i !== screenshotIndex)
+    }
+  }
+  throw new Error('多次跳过敏感截图后仍无法完成 AI 分析')
 }
 
 /**
@@ -1239,15 +1291,26 @@ AIService.prototype.analyzeTimeslotByProvider = async function (provider, args) 
         { responseFormat: 'json_object' }
       )
     } else {
-      const messages = buildVisionMessages(sample, instructionText)
-      if (!messages) throw new Error(`没有有效的截图可传给 ${provider.name || provider.id}`)
-      // 在 vision messages 前面再插入 system
-      messages.unshift({ role: 'system', content: systemPrompt })
-      text = await callOpenAICompatChat(provider, messages, { responseFormat: 'json_object' })
+      const res = await callVisionWithSensitiveRetry(provider, sample, instructionText, systemPrompt)
+      text = res.text
+      if (res.skippedSensitive && res.skippedSensitive.length) {
+        console.warn('[FocusFlow][AI] 本次分析已跳过敏感截图：', res.skippedSensitive)
+      }
     }
   }
   if (!text) throw new Error('AI 返回了空内容')
+  console.log('[FocusFlow][AI] 原始输出（前 300 字符）:\n' + String(text).slice(0, 300))
   const parsed = parseAnalysisJson(text)
+  if (parsed._parseFailed) {
+    console.warn('[FocusFlow][AI] JSON 解析失败，model=', provider.model, ' provider=', provider.id)
+  } else {
+    console.log('[FocusFlow][AI] 解析成功:', {
+      title: parsed.title,
+      categories: parsed.categories,
+      summaryLen: parsed.summary.length,
+      detailLen: parsed.detail.length
+    })
+  }
   parsed.model = provider.model
   return parsed
 }
