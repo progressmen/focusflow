@@ -747,3 +747,19 @@ function formatTimeslot(roundedSeconds) {
 }
 
 export default ActivityTracker
+
+// 应用级单例：保证在 Vue 组件多次挂载/卸载之间状态(定时器、追踪标志)持续存在
+// 通过挂到 globalThis 上避免 Vite HMR 时重复初始化
+let _sharedTracker = null
+if (typeof globalThis !== 'undefined') {
+  if (globalThis.__focusflowTrackerInstance) {
+    _sharedTracker = globalThis.__focusflowTrackerInstance
+  } else {
+    _sharedTracker = new ActivityTracker()
+    globalThis.__focusflowTrackerInstance = _sharedTracker
+  }
+} else {
+  _sharedTracker = new ActivityTracker()
+}
+
+export const trackerInstance = _sharedTracker

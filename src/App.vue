@@ -50,7 +50,7 @@
           </div>
         </div>
 
-        <button @click="toggleTracking" :class="['btn', { 'btn-danger': isTracking }]">
+        <button @click="toggleTracking" :class="['btn', isTracking ? 'btn-danger' : 'btn-success']">
           {{ isTracking ? '停止追踪' : '开始追踪' }}
         </button>
         <button class="btn btn-primary" :disabled="generatingReport" @click="openReport">
@@ -300,7 +300,7 @@
 import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 import { marked } from 'marked'
 import DOMPurify from 'dompurify'
-import { ActivityTracker } from './services/ActivityTracker'
+import { ActivityTracker, trackerInstance } from './services/ActivityTracker'
 import { AIService } from './services/AIService'
 import settingsService from './services/Settings.js'
 import AppUsageChart from './components/AppUsageChart.vue'
@@ -312,8 +312,14 @@ marked.setOptions({
   breaks: true
 })
 
-const activityTracker = new ActivityTracker()
+// 使用应用级单例 tracker，避免组件重挂载时丢失追踪状态
+const activityTracker = trackerInstance
 const aiService = new AIService()
+
+// 在 window 上保留 tracker 引用，方便从 preload 中调用 tracker 方法
+if (typeof window !== 'undefined') {
+  window.__focusflowTracker = activityTracker
+}
 
 // 状态
 const isTracking = ref(false)
@@ -395,10 +401,9 @@ const lastRefreshLabel = computed(() => {
 
 onMounted(async () => {
   // 监听 uTools 插件进入
-  window.addEventListener('utools:enter', () => {
-    // 进入插件时立即刷新一次
-    refreshAll()
-  })
+  window.addEventListener('utools:enter', onUtoolsEnter)
+  // 监听 preload 层快捷命令导致的追踪状态变化
+  window.addEventListener('focusflow:tracking-changed', onTrackingChanged)
   // 监听浏览器/插件页面重新可见
   document.addEventListener('visibilitychange', onVisibilityChange)
   // 启动每秒滴答（仅用于更新「N 秒前」文案）
@@ -409,7 +414,25 @@ onMounted(async () => {
   // 订阅 Tracker 的 AI 分析状态变化（用于自动同步时间轴 UI 上的「分析中」）
   unsubscribeAnalysisState = activityTracker.onAnalysisStateChange(onAnalysisStateChange)
 
+  // 同步追踪器实际状态到 UI（处理从其他视图返回后状态不一致的情况）
+  isTracking.value = !!activityTracker.isTracking
+  if (isTracking.value) {
+    startAutoRefresh()
+  }
+
   await refreshAll()
+
+  // 处理在 Vue 挂载前已经触发的 onPluginEnter（preload.js 会缓存到 window.__focusflowPendingEnter）
+  // 否则用户用关键词进入插件时，事件可能已派发但还没有监听器
+  try {
+    const pending = (typeof window !== 'undefined' && window.__focusflowPendingEnter) || null
+    if (pending) {
+      window.__focusflowPendingEnter = null
+      await handlePluginEnter(pending)
+    }
+  } catch (e) {
+    console.error('[FocusFlow] 处理 pending enter 失败:', e)
+  }
 
   // 自动开始追踪：根据「设置 → 追踪设置 → 自动开始追踪」决定
   try {
@@ -431,14 +454,57 @@ onBeforeUnmount(() => {
     nowTickTimer = null
   }
   document.removeEventListener('visibilitychange', onVisibilityChange)
+  window.removeEventListener('utools:enter', onUtoolsEnter)
+  window.removeEventListener('focusflow:tracking-changed', onTrackingChanged)
   if (typeof unsubscribeAnalysisState === 'function') {
     unsubscribeAnalysisState()
     unsubscribeAnalysisState = null
   }
-  if (activityTracker.isTracking) {
-    activityTracker.stopTracking()
-  }
+  // 注意：不要在组件卸载时停止 activityTracker
+  // uTools 插件在隐藏 / 切换时可能会卸载视图，但用户期望追踪持续在后台
+  // 真正的停止只应通过用户点击「停止追踪」或快捷命令「关闭记录」触发
 })
+
+// 监听 utools:enter 事件
+async function onUtoolsEnter(event) {
+  const detail = (event && event.detail) || {}
+  await handlePluginEnter(detail)
+}
+
+// 监听由 preload 层派发的追踪状态变化事件，同步 UI
+function onTrackingChanged(event) {
+  const tracking = !!(event && event.detail && event.detail.tracking)
+  isTracking.value = tracking
+  if (tracking) {
+    startAutoRefresh()
+  } else {
+    stopAutoRefresh()
+  }
+  refreshAll()
+}
+
+// 统一的进入处理逻辑（来自事件 或 来自 pending 缓存）
+// 注意：实际的「开始/停止记录」已由 preload.js 在 onPluginEnter 中直接执行
+// 这里只负责 UI 状态同步与刷新
+async function handlePluginEnter(detail) {
+  const code = detail && detail.code
+
+  // 快捷命令时，等 preload 端执行完毕后同步 UI
+  if (code === 'focusflow-start' || code === 'focusflow-stop') {
+    setTimeout(() => {
+      isTracking.value = !!activityTracker.isTracking
+      if (isTracking.value) {
+        startAutoRefresh()
+      } else {
+        stopAutoRefresh()
+      }
+      refreshAll()
+    }, 200)
+    return
+  }
+  // 普通打开：仅刷新
+  refreshAll()
+}
 
 function onVisibilityChange() {
   // 页面重新可见时刷新一次（避免长时间隐藏数据陈旧）
@@ -1089,6 +1155,8 @@ async function reanalyzeSlot(item) {
 .btn-primary:hover { background: #2980b9; }
 .btn-danger { background: #e74c3c; }
 .btn-danger:hover { background: #c0392b; }
+.btn-success { background: #27ae60; color: #fff; }
+.btn-success:hover { background: #1f8b4d; }
 .btn-secondary { background: #95a5a6; }
 .btn-secondary:hover { background: #7f8c8d; }
 .btn-warning { background: #f39c12; }

@@ -13,14 +13,28 @@
       "code": "focusflow",
       "explain": "打开 FocusFlow 主页",
       "cmds": [
-        "focusFlow"
+        "focusFlow",
+        "活动追踪"
       ]
     },
     {
-      "code": "活动追踪",
-      "explain": "打开 FocusFlow 主页",
+      "code": "focusflow-start",
+      "explain": "FocusFlow：开始记录活动",
       "cmds": [
-        "活动追踪"
+        "开始记录",
+        "开启记录",
+        "start tracking",
+        "focusFlow开始"
+      ]
+    },
+    {
+      "code": "focusflow-stop",
+      "explain": "FocusFlow：停止记录活动",
+      "cmds": [
+        "停止记录",
+        "关闭记录",
+        "stop tracking",
+        "focusFlow停止"
       ]
     }
   ]

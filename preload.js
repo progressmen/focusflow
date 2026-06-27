@@ -146,22 +146,86 @@ function compressImage(dataUrl, maxW = 1280, maxH = 720, quality = 0.7) {
   })
 }
 
-// ========== uTools 环境 ==========
+// uTools 环境
 if (typeof utools !== 'undefined') {
   console.log('uTools API available')
 
-  // 插件进入/退出事件
-  try {
-    utools.onPluginEnter(({ code, type, payload }) => {
-      console.log('FocusFlow plugin entered:', { code, type, payload })
-      window.dispatchEvent(new CustomEvent('utools:enter', { detail: { code, type, payload } }))
+  // 缓存最近一次的 onPluginEnter 信息，避免 Vue 挂载晚于 onPluginEnter 导致事件丢失
+  window.__focusflowPendingEnter = null
+
+  // 等待 Vue 端把 tracker 实例挂到 window.__focusflowTracker 上
+  // 然后立即执行快捷命令；最长等待 10 秒
+  function _waitTrackerReady(timeoutMs = 10000) {
+    return new Promise((resolve) => {
+      const start = Date.now()
+      const tick = () => {
+        if (window.__focusflowTracker && typeof window.__focusflowTracker.startTracking === 'function') {
+          resolve(window.__focusflowTracker)
+          return
+        }
+        if (Date.now() - start > timeoutMs) {
+          resolve(null)
+          return
+        }
+        setTimeout(tick, 50)
+      }
+      tick()
     })
-    utools.onPluginOut(() => {
-      console.log('FocusFlow plugin exited')
-      window.dispatchEvent(new CustomEvent('utools:exit'))
+  }
+
+  // 直接在 preload 层执行快捷命令（不依赖 Vue 是否挂载）
+  async function _executeShortcutCommand(code) {
+    try {
+      const tracker = await _waitTrackerReady()
+      if (!tracker) {
+        try { utools.showNotification('FocusFlow 启动中，请稍后重试') } catch (e) {}
+        return
+      }
+      if (code === 'focusflow-start') {
+        if (!tracker.isTracking) {
+          await tracker.startTracking()
+          try { utools.showNotification('FocusFlow 已开始记录活动') } catch (e) {}
+        } else {
+          try { utools.showNotification('FocusFlow 已经在记录中') } catch (e) {}
+        }
+        window.dispatchEvent(new CustomEvent('focusflow:tracking-changed', { detail: { tracking: true } }))
+      } else if (code === 'focusflow-stop') {
+        if (tracker.isTracking) {
+          await tracker.stopTracking()
+          try { utools.showNotification('FocusFlow 已停止记录活动') } catch (e) {}
+        } else {
+          try { utools.showNotification('FocusFlow 当前未在记录') } catch (e) {}
+        }
+        window.dispatchEvent(new CustomEvent('focusflow:tracking-changed', { detail: { tracking: false } }))
+      }
+    } catch (e) {
+      console.error('[FocusFlow] 执行快捷命令失败:', code, e)
+    }
+  }
+
+  // 注册 onPluginEnter：处理快捷命令并通知 Vue 端
+  try {
+    utools.onPluginEnter((payload) => {
+      const code = payload && payload.code
+      window.__focusflowPendingEnter = payload
+      window.dispatchEvent(new CustomEvent('utools:enter', { detail: payload }))
+      if (code === 'focusflow-start' || code === 'focusflow-stop') {
+        _executeShortcutCommand(code)
+      }
     })
   } catch (e) {
-    console.error('onPluginEnter/onPluginOut 注册失败:', e)
+    console.error('[FocusFlow] onPluginEnter 注册失败:', e)
+  }
+
+  // 注册 onPluginOut
+  try {
+    if (typeof utools.onPluginOut === 'function') {
+      utools.onPluginOut(() => {
+        window.dispatchEvent(new CustomEvent('utools:exit'))
+      })
+    }
+  } catch (e) {
+    console.error('[FocusFlow] onPluginOut 注册失败:', e)
   }
 
   // 直接暴露 utools.db 供通用读取
