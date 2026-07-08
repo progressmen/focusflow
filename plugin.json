@@ -10,31 +10,17 @@
   "preload": "preload.js",
   "features": [
     {
-      "code": "focusflow",
+      "code": "FocusFlow",
       "explain": "打开 FocusFlow 主页",
       "cmds": [
-        "focusFlow",
-        "活动追踪"
-      ]
-    },
-    {
-      "code": "focusflow-start",
-      "explain": "FocusFlow：开始记录活动",
-      "cmds": [
+        "FocusFlow",
+        "活动追踪",
         "开始记录",
         "开启记录",
-        "start tracking",
-        "focusFlow开始"
-      ]
-    },
-    {
-      "code": "focusflow-stop",
-      "explain": "FocusFlow：停止记录活动",
-      "cmds": [
+        "FocusFlow开始",
         "停止记录",
         "关闭记录",
-        "stop tracking",
-        "focusFlow停止"
+        "FocusFlow停止"
       ]
     }
   ]

@@ -85,9 +85,9 @@ focusflow/
   },
   "features": [
     {
-      "code": "focusflow",
+      "code": "FocusFlow",
       "explain": "打开 FocusFlow 主页",
-      "cmds": ["focusFlow"]
+      "cmds": ["FocusFlow", "活动追踪"]
     }
   ]
 }

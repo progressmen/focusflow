@@ -280,6 +280,15 @@
         </label>
       </div>
       <div class="form-group">
+        <label class="checkbox-label">
+          <input type="checkbox" v-model="settings.floatingIcon" />
+          显示桌面悬浮图标（可一键开关追踪）
+        </label>
+        <small class="form-help">
+          在屏幕角落显示一个可拖动的小图标：绿色 = 正在追踪，灰色 = 已停止。点击可切换状态。
+        </small>
+      </div>
+      <div class="form-group">
         <label for="screenshot-interval">截图间隔（秒）</label>
         <input
           id="screenshot-interval"
@@ -700,6 +709,7 @@ const settings = reactive({
   autoStart: false,
   notifications: true,
   screenshotInterval: 30,
+  floatingIcon: false,
   defaultCategory: '',
   aiModel: ''
 })
@@ -741,6 +751,7 @@ const loadSettings = () => {
     'autoStart',
     'notifications',
     'screenshotInterval',
+    'floatingIcon',
     'defaultCategory'
   ]
   ownKeys.forEach((k) => {
@@ -759,6 +770,7 @@ const saveSettingsHandler = () => {
     autoStart: settings.autoStart,
     notifications: settings.notifications,
     screenshotInterval: settings.screenshotInterval,
+    floatingIcon: settings.floatingIcon,
     defaultCategory: settings.defaultCategory
   }
   // 兜底清掉 PouchDB 元字段（service 层也会再剥一次）

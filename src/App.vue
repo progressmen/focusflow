@@ -444,6 +444,9 @@ onMounted(async () => {
   } catch (e) {
     console.error('[FocusFlow] 自动开始追踪失败：', e)
   }
+
+  // 根据「设置 → 显示桌面悬浮图标」启动悬浮窗
+  syncFloatingIconBySettings()
 })
 
 onBeforeUnmount(() => {
@@ -480,6 +483,12 @@ function onTrackingChanged(event) {
   } else {
     stopAutoRefresh()
   }
+  // 同步到悬浮窗（preload 内部已经推过一次，这里再补一次保证 UI 一致）
+  try {
+    if (typeof window !== 'undefined' && typeof window.updateFloatingIconState === 'function') {
+      window.updateFloatingIconState(tracking)
+    }
+  } catch (e) {}
   refreshAll()
 }
 
@@ -488,9 +497,15 @@ function onTrackingChanged(event) {
 // 这里只负责 UI 状态同步与刷新
 async function handlePluginEnter(detail) {
   const code = detail && detail.code
+  const typedCmd = detail && detail.payload
+
+  const cmd = String(typedCmd || '').replace(/\s+/g, '').toLowerCase()
+  const startCmds = ['开始记录', '开启记录', 'focusflow开始', 'starttracking']
+  const stopCmds = ['停止记录', '关闭记录', 'focusflow停止', 'stoptracking']
+  const isShortcut = code === 'FocusFlow' && (startCmds.includes(cmd) || stopCmds.includes(cmd))
 
   // 快捷命令时，等 preload 端执行完毕后同步 UI
-  if (code === 'focusflow-start' || code === 'focusflow-stop') {
+  if (isShortcut) {
     setTimeout(() => {
       isTracking.value = !!activityTracker.isTracking
       if (isTracking.value) {
@@ -609,7 +624,33 @@ async function toggleTracking() {
     isTracking.value = true
     startAutoRefresh()
   }
+  // 同步追踪状态到悬浮窗
+  try {
+    if (typeof window !== 'undefined' && typeof window.updateFloatingIconState === 'function') {
+      window.updateFloatingIconState(isTracking.value)
+    }
+  } catch (e) {}
   await refreshAll()
+}
+
+// 根据设置中的 floatingIcon 开关，打开或关闭悬浮窗
+function syncFloatingIconBySettings() {
+  try {
+    const tracking = settingsService.loadTrackingSettings() || {}
+    const want = !!tracking.floatingIcon
+    if (typeof window === 'undefined') return
+    if (want) {
+      if (typeof window.openFloatingIcon === 'function') {
+        window.openFloatingIcon()
+      }
+    } else {
+      if (typeof window.closeFloatingIcon === 'function') {
+        window.closeFloatingIcon()
+      }
+    }
+  } catch (e) {
+    console.error('[FocusFlow] 同步悬浮图标设置失败:', e)
+  }
 }
 
 async function generateReport(force = false) {
@@ -734,6 +775,8 @@ function onSettingsUpdated(payload) {
     } catch (e) {
       console.error('onSettingsUpdated 失败:', e)
     }
+    // 应用悬浮图标开关
+    syncFloatingIconBySettings()
   }
 
   // 如果是「清理数据 / 导入数据」事件，需要把页面状态全部重置（包括 AI 报告/弹窗/分析中等内存态）

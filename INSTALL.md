@@ -73,7 +73,7 @@
 ### 快捷键
 
 - `Alt + Space`：打开 uTools 搜索框
-- 输入 "focusFlow"：快速启动插件主页面
+- 输入 "FocusFlow"：快速启动插件主页面
 
 ### 数据解读
 

@@ -174,14 +174,21 @@ if (typeof utools !== 'undefined') {
   }
 
   // 直接在 preload 层执行快捷命令（不依赖 Vue 是否挂载）
-  async function _executeShortcutCommand(code) {
+  // 现在合并为单一 feature，通过 typedCmd 判断具体命令
+  async function _executeShortcutCommand(typedCmd) {
     try {
       const tracker = await _waitTrackerReady()
       if (!tracker) {
         try { utools.showNotification('FocusFlow 启动中，请稍后重试') } catch (e) {}
         return
       }
-      if (code === 'focusflow-start') {
+      const cmd = String(typedCmd || '').replace(/\s+/g, '').toLowerCase()
+      const startCmds = ['开始记录', '开启记录', 'focusflow开始', 'starttracking']
+      const stopCmds = ['停止记录', '关闭记录', 'focusflow停止', 'stoptracking']
+      const isStart = startCmds.includes(cmd)
+      const isStop = stopCmds.includes(cmd)
+
+      if (isStart) {
         if (!tracker.isTracking) {
           await tracker.startTracking()
           try { utools.showNotification('FocusFlow 已开始记录活动') } catch (e) {}
@@ -189,7 +196,7 @@ if (typeof utools !== 'undefined') {
           try { utools.showNotification('FocusFlow 已经在记录中') } catch (e) {}
         }
         window.dispatchEvent(new CustomEvent('focusflow:tracking-changed', { detail: { tracking: true } }))
-      } else if (code === 'focusflow-stop') {
+      } else if (isStop) {
         if (tracker.isTracking) {
           await tracker.stopTracking()
           try { utools.showNotification('FocusFlow 已停止记录活动') } catch (e) {}
@@ -199,18 +206,29 @@ if (typeof utools !== 'undefined') {
         window.dispatchEvent(new CustomEvent('focusflow:tracking-changed', { detail: { tracking: false } }))
       }
     } catch (e) {
-      console.error('[FocusFlow] 执行快捷命令失败:', code, e)
+      console.error('[FocusFlow] 执行快捷命令失败:', typedCmd, e)
     }
+  }
+
+  // 判断是否为开始/停止命令（用于 UI 侧同步）
+  function _resolveCommandType(typedCmd) {
+    const cmd = String(typedCmd || '').replace(/\s+/g, '').toLowerCase()
+    const startCmds = ['开始记录', '开启记录', 'focusflow开始', 'starttracking']
+    const stopCmds = ['停止记录', '关闭记录', 'focusflow停止', 'stoptracking']
+    if (startCmds.includes(cmd)) return 'start'
+    if (stopCmds.includes(cmd)) return 'stop'
+    return 'main'
   }
 
   // 注册 onPluginEnter：处理快捷命令并通知 Vue 端
   try {
     utools.onPluginEnter((payload) => {
       const code = payload && payload.code
+      const typedCmd = payload && payload.payload
       window.__focusflowPendingEnter = payload
       window.dispatchEvent(new CustomEvent('utools:enter', { detail: payload }))
-      if (code === 'focusflow-start' || code === 'focusflow-stop') {
-        _executeShortcutCommand(code)
+      if (code === 'FocusFlow' && _resolveCommandType(typedCmd) !== 'main') {
+        _executeShortcutCommand(typedCmd)
       }
     })
   } catch (e) {
@@ -226,6 +244,263 @@ if (typeof utools !== 'undefined') {
     }
   } catch (e) {
     console.error('[FocusFlow] onPluginOut 注册失败:', e)
+  }
+
+  // ========== 悬浮图标窗口管理 ==========
+  // 保存悬浮窗 BrowserWindow 实例（仅一份，再次调用会先关闭旧的）
+  let _floatWin = null
+  // 悬浮窗加载完成回调，会触发首次状态推送
+  let _floatReadyCallback = null
+
+  function _getFloatHtmlPath() {
+    try {
+      // preload.js 与 floating-icon.html 都在打包后的根目录下
+      // 使用相对路径，uTools createBrowserWindow 内部会基于插件根目录
+      return 'floating-icon.html'
+    } catch (e) {
+      return 'floating-icon.html'
+    }
+  }
+
+  function _getInitialPosition() {
+    try {
+      // 使用 require('electron').screen 获取屏幕可用工作区
+      const electron = require('electron')
+      const screen = electron && electron.screen
+      if (screen && typeof screen.getPrimaryDisplay === 'function') {
+        const wa = screen.getPrimaryDisplay().workArea
+        return {
+          x: Math.max(wa.x, wa.x + wa.width - 80),
+          y: Math.max(wa.y, wa.y + wa.height - 110)
+        }
+      }
+    } catch (e) {}
+    return { x: 1200, y: 700 }
+  }
+
+  // 打开悬浮窗
+  window.openFloatingIcon = function () {
+    try {
+      // 已经存在，直接显示
+      if (_floatWin && !_floatWin.isDestroyed?.()) {
+        try { _floatWin.show && _floatWin.show() } catch (e) {}
+        // 同步状态
+        const tracking = !!(window.__focusflowTracker && window.__focusflowTracker.isTracking)
+        _pushTrackingToFloat(tracking)
+        return true
+      }
+      const pos = _getInitialPosition()
+      _floatWin = utools.createBrowserWindow(
+        _getFloatHtmlPath(),
+        {
+          width: 64,
+          height: 64,
+          x: pos.x,
+          y: pos.y,
+          frame: false,
+          transparent: true,
+          alwaysOnTop: true,
+          skipTaskbar: true,
+          resizable: false,
+          movable: true,
+          minimizable: false,
+          maximizable: false,
+          fullscreenable: false,
+          hasShadow: false,
+          backgroundColor: '#00000000',
+          webPreferences: {
+            devTools: false,
+            contextIsolation: false,
+            nodeIntegration: true
+          }
+        },
+        () => {
+          // 加载完成 → 立即推送当前追踪状态
+          const tracking = !!(window.__focusflowTracker && window.__focusflowTracker.isTracking)
+          _pushTrackingToFloat(tracking)
+          if (typeof _floatReadyCallback === 'function') {
+            try { _floatReadyCallback() } catch (e) {}
+          }
+        }
+      )
+      // 关键：直接监听悬浮窗 webContents 上的 IPC 消息，速度比 db 队列快得多
+      try {
+        const wc = _floatWin && _floatWin.webContents
+        if (wc && typeof wc.on === 'function') {
+          wc.on('ipc-message', (_e, channel, payload) => {
+            if (channel === 'focusflow:from-float') {
+              _handleFloatMessage(payload)
+            }
+          })
+        }
+      } catch (e) {
+        console.error('[FocusFlow] 监听悬浮窗 IPC 失败:', e)
+      }
+      return true
+    } catch (e) {
+      console.error('[FocusFlow] 创建悬浮窗失败:', e)
+      return false
+    }
+  }
+
+  // 关闭悬浮窗
+  window.closeFloatingIcon = function () {
+    try {
+      if (_floatWin && !_floatWin.isDestroyed?.()) {
+        if (typeof _floatWin.close === 'function') {
+          _floatWin.close()
+        } else if (typeof _floatWin.destroy === 'function') {
+          _floatWin.destroy()
+        }
+      }
+    } catch (e) {
+      console.error('[FocusFlow] 关闭悬浮窗失败:', e)
+    }
+    _floatWin = null
+    return true
+  }
+
+  // 悬浮窗是否已打开
+  window.isFloatingIconOpen = function () {
+    return !!(_floatWin && !_floatWin.isDestroyed?.())
+  }
+
+  // 推送追踪状态到悬浮窗
+  function _pushTrackingToFloat(tracking) {
+    // 1) 通过 webContents 推送（最快）
+    if (_floatWin && !_floatWin.isDestroyed?.()) {
+      try {
+        const wc = _floatWin.webContents
+        if (wc && typeof wc.send === 'function') {
+          wc.send('focusflow:tracking-state', { tracking: !!tracking })
+        }
+      } catch (e) {
+        console.error('[FocusFlow] 推送状态到悬浮窗失败:', e)
+      }
+    }
+    // 2) 同时写入 utools.db 状态文档，悬浮窗可以轮询读取（兜底）
+    try {
+      const docId = 'focusflow/tracking-state'
+      const cur = utools.db.get(docId) || {}
+      const doc = { _id: docId, tracking: !!tracking, ts: Date.now() }
+      if (cur._rev) doc._rev = cur._rev
+      utools.db.put(doc)
+    } catch (e) {}
+  }
+
+  // 暴露给主插件用：当追踪状态变化时调用
+  window.updateFloatingIconState = function (tracking) {
+    _pushTrackingToFloat(!!tracking)
+  }
+
+  // 监听悬浮窗 sendToParent 发来的消息
+  // 多通道兼容：
+  //   - utools 的 plugin-callout（部分版本支持）
+  //   - 通用 ipc 通道 focusflow:from-float（webContents.send 触发）
+  //   - utools.db 命令队列（最稳的兜底，悬浮窗 .upx 隔离环境也能用）
+  try {
+    const electron = require('electron')
+    if (electron && electron.ipcRenderer) {
+      electron.ipcRenderer.on('plugin-callout', (_e, msg) => {
+        _handleFloatMessage(msg)
+      })
+      electron.ipcRenderer.on('focusflow:from-float', (_e, msg) => {
+        _handleFloatMessage(msg)
+      })
+    }
+  } catch (e) {
+    console.warn('[FocusFlow] electron ipc 不可用:', e.message)
+  }
+
+  // utools.db 命令队列轮询（兜底通道）
+  // 悬浮窗写入 focusflow/cmd-queue，主插件每 300ms 检查并消费
+  const CMD_QUEUE_DOC_ID = 'focusflow/cmd-queue'
+  let _cmdQueueTimer = null
+  function _startCmdQueuePoll() {
+    if (_cmdQueueTimer) return
+    _cmdQueueTimer = setInterval(() => {
+      try {
+        const doc = utools.db.get(CMD_QUEUE_DOC_ID)
+        if (!doc || !Array.isArray(doc.items) || doc.items.length === 0) return
+        // 拷贝并清空队列
+        const items = doc.items.slice()
+        doc.items = []
+        utools.db.put(doc)
+        items.forEach((it) => {
+          _handleFloatMessage(it)
+        })
+      } catch (e) {}
+    }, 300)
+  }
+  _startCmdQueuePoll()
+
+  function _handleFloatMessage(msg) {
+    if (!msg || typeof msg !== 'object') return
+    if (msg.type === 'toggle-tracking') {
+      _toggleTrackingFromFloat()
+    } else if (msg.type === 'open-main') {
+      try { utools.showMainWindow && utools.showMainWindow() } catch (e) {}
+    } else if (msg.type === 'request-state') {
+      const tracking = !!(window.__focusflowTracker && window.__focusflowTracker.isTracking)
+      _pushTrackingToFloat(tracking)
+    } else if (msg.type === 'drag-start') {
+      // 悬浮窗开始拖动：记录初始位置
+      _floatDrag = null
+      try {
+        if (_floatWin && !_floatWin.isDestroyed?.() && typeof _floatWin.getPosition === 'function') {
+          const pos = _floatWin.getPosition()
+          _floatDrag = {
+            startScreenX: msg.screenX,
+            startScreenY: msg.screenY,
+            windowX: pos[0],
+            windowY: pos[1]
+          }
+        }
+      } catch (e) {
+        console.error('[FocusFlow] drag-start 失败:', e)
+      }
+    } else if (msg.type === 'drag-move') {
+      // 悬浮窗拖动中：根据屏幕坐标增量更新窗口位置
+      if (!_floatDrag) return
+      try {
+        if (_floatWin && !_floatWin.isDestroyed?.() && typeof _floatWin.setPosition === 'function') {
+          const dx = msg.screenX - _floatDrag.startScreenX
+          const dy = msg.screenY - _floatDrag.startScreenY
+          _floatWin.setPosition(
+            Math.round(_floatDrag.windowX + dx),
+            Math.round(_floatDrag.windowY + dy)
+          )
+        }
+      } catch (e) {
+        console.error('[FocusFlow] drag-move 失败:', e)
+      }
+    } else if (msg.type === 'drag-end') {
+      _floatDrag = null
+    }
+  }
+  let _floatDrag = null
+
+  async function _toggleTrackingFromFloat() {
+    try {
+      const tracker = window.__focusflowTracker
+      if (!tracker) {
+        try { utools.showNotification('FocusFlow 未就绪') } catch (e) {}
+        return
+      }
+      if (tracker.isTracking) {
+        await tracker.stopTracking()
+        try { utools.showNotification('FocusFlow 已停止记录') } catch (e) {}
+        window.dispatchEvent(new CustomEvent('focusflow:tracking-changed', { detail: { tracking: false } }))
+        _pushTrackingToFloat(false)
+      } else {
+        await tracker.startTracking()
+        try { utools.showNotification('FocusFlow 已开始记录') } catch (e) {}
+        window.dispatchEvent(new CustomEvent('focusflow:tracking-changed', { detail: { tracking: true } }))
+        _pushTrackingToFloat(true)
+      }
+    } catch (e) {
+      console.error('[FocusFlow] 悬浮窗触发追踪切换失败:', e)
+    }
   }
 
   // 直接暴露 utools.db 供通用读取

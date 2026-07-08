@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>FocusFlow 悬浮图标</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; user-select: none; -webkit-user-select: none; }
+    html, body {
+      width: 100%;
+      height: 100%;
+      background: transparent;
+      overflow: hidden;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    }
+    .float-btn {
+      width: 56px;
+      height: 56px;
+      border-radius: 50%;
+      background: linear-gradient(135deg, #95a5a6 0%, #7f8c8d 100%);
+      box-shadow: 0 4px 18px rgba(0, 0, 0, 0.25), 0 2px 4px rgba(0, 0, 0, 0.18);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: grab;
+      transition: transform 0.15s ease, box-shadow 0.15s ease, background 0.3s ease;
+      position: relative;
+      margin: 4px;
+    }
+    .float-btn.dragging {
+      cursor: grabbing;
+      transition: none;
+    }
+    .float-btn:hover {
+      transform: scale(1.05);
+      box-shadow: 0 6px 24px rgba(0, 0, 0, 0.3), 0 3px 6px rgba(0, 0, 0, 0.22);
+    }
+    .float-btn.tracking {
+      background: linear-gradient(135deg, #27ae60 0%, #1f8b4d 100%);
+    }
+    .float-btn.tracking::before {
+      content: '';
+      position: absolute;
+      top: -3px;
+      left: -3px;
+      right: -3px;
+      bottom: -3px;
+      border-radius: 50%;
+      border: 2px solid rgba(39, 174, 96, 0.4);
+      animation: pulse 2s ease-out infinite;
+      pointer-events: none;
+    }
+    @keyframes pulse {
+      0% { transform: scale(1); opacity: 0.8; }
+      100% { transform: scale(1.4); opacity: 0; }
+    }
+    .icon-svg {
+      width: 32px;
+      height: 32px;
+      pointer-events: none;
+    }
+    .status-dot {
+      position: absolute;
+      bottom: 4px;
+      right: 4px;
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      background: #e74c3c;
+      border: 2px solid #fff;
+      pointer-events: none;
+    }
+    .float-btn.tracking .status-dot {
+      background: #2ecc71;
+    }
+  </style>
+</head>
+<body>
+  <div id="floatBtn" class="float-btn" title="点击切换追踪 · 拖动调整位置 · 双击打开主面板">
+    <svg class="icon-svg" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
+      <circle cx="32" cy="32" r="22" fill="none" stroke="white" stroke-width="3" />
+      <g stroke="white" stroke-width="2">
+        <line x1="32" y1="14" x2="32" y2="18" />
+        <line x1="50" y1="32" x2="46" y2="32" />
+        <line x1="32" y1="50" x2="32" y2="46" />
+        <line x1="14" y1="32" x2="18" y2="32" />
+      </g>
+      <g stroke="white" stroke-width="3" stroke-linecap="round">
+        <line x1="32" y1="32" x2="32" y2="23" />
+        <line x1="32" y1="32" x2="40" y2="32" />
+      </g>
+      <circle cx="32" cy="32" r="2" fill="white" />
+    </svg>
+    <span class="status-dot" id="statusDot"></span>
+  </div>
+
+  <script>
+    // 获取 electron remote（兼容新旧版本）
+    let remoteApi = null
+    let ipcRenderer = null
+    let utoolsDb = null
+    try {
+      const electron = require('electron')
+      ipcRenderer = electron && electron.ipcRenderer
+    } catch (e) {}
+    try {
+      remoteApi = require('@electron/remote')
+    } catch (e) {
+      try {
+        const electron = require('electron')
+        remoteApi = electron && electron.remote
+      } catch (e2) {}
+    }
+    // 悬浮窗也有 utools 对象（uTools 注入），可访问 db
+    try {
+      if (typeof utools !== 'undefined' && utools && utools.db) {
+        utoolsDb = utools.db
+      }
+    } catch (e) {}
+
+    function getCurrentWindow() {
+      try {
+        if (remoteApi && typeof remoteApi.getCurrentWindow === 'function') {
+          return remoteApi.getCurrentWindow()
+        }
+      } catch (e) {}
+      return null
+    }
+
+    const btn = document.getElementById('floatBtn')
+    const dot = document.getElementById('statusDot')
+    console.log('[FocusFlow Float] init, db=', !!utoolsDb, ', remote=', !!remoteApi, ', ipc=', !!ipcRenderer)
+
+    // ============ 命令队列：通过 utools.db 发送命令到主插件 ============
+    function pushCmdToQueue(msg) {
+      if (!utoolsDb) return false
+      try {
+        const docId = 'focusflow/cmd-queue'
+        const cur = utoolsDb.get(docId) || {}
+        const items = Array.isArray(cur.items) ? cur.items.slice() : []
+        items.push(Object.assign({ ts: Date.now() }, msg))
+        const doc = { _id: docId, items: items.slice(-30) }
+        if (cur._rev) doc._rev = cur._rev
+        const r = utoolsDb.put(doc)
+        // 处理 rev 冲突
+        if (r && r.error === 'conflict') {
+          const cur2 = utoolsDb.get(docId) || {}
+          doc._rev = cur2._rev
+          utoolsDb.put(doc)
+        }
+        return true
+      } catch (e) {
+        console.error('pushCmdToQueue 失败:', e)
+        return false
+      }
+    }
+
+    // ============ 通信工具 ============
+    // 优先用 IPC（最快，主插件 preload 监听 webContents 的 ipc-message）
+    // 失败时退回 db 队列
+    function sendCmd(msg) {
+      // 1) ipcRenderer.send（最快，几乎无延迟）
+      try {
+        if (ipcRenderer && typeof ipcRenderer.send === 'function') {
+          ipcRenderer.send('focusflow:from-float', msg)
+          return true
+        }
+      } catch (e) {}
+      // 2) db 队列兜底
+      return pushCmdToQueue(msg)
+    }
+
+    // ============ 拖动逻辑 ============
+    let dragState = null
+
+    btn.addEventListener('mousedown', (e) => {
+      if (e.button !== 0) return
+      dragState = {
+        startScreenX: e.screenX,
+        startScreenY: e.screenY,
+        moved: false,
+        lastSentTs: 0
+      }
+      // 通知主插件 preload：开始拖动
+      sendCmd({
+        type: 'drag-start',
+        screenX: e.screenX,
+        screenY: e.screenY
+      })
+      btn.classList.add('dragging')
+      e.preventDefault()
+    })
+
+    window.addEventListener('mousemove', (e) => {
+      if (!dragState) return
+      const dx = e.screenX - dragState.startScreenX
+      const dy = e.screenY - dragState.startScreenY
+      if (!dragState.moved && Math.abs(dx) + Math.abs(dy) > 3) {
+        dragState.moved = true
+      }
+      if (dragState.moved) {
+        // 节流到 16ms（约 60fps）
+        const now = Date.now()
+        if (now - dragState.lastSentTs > 16) {
+          dragState.lastSentTs = now
+          sendCmd({
+            type: 'drag-move',
+            screenX: e.screenX,
+            screenY: e.screenY
+          })
+        }
+      }
+    })
+
+    window.addEventListener('mouseup', (e) => {
+      if (!dragState) return
+      const wasMoved = dragState.moved
+      if (wasMoved) {
+        sendCmd({
+          type: 'drag-move',
+          screenX: e.screenX,
+          screenY: e.screenY
+        })
+      }
+      sendCmd({ type: 'drag-end' })
+      dragState = null
+      btn.classList.remove('dragging')
+      if (!wasMoved) {
+        toggleTracking()
+      }
+    })
+
+    // ============ 双击 → 打开主窗口 ============
+    btn.addEventListener('dblclick', () => {
+      sendCmd({ type: 'open-main' })
+      try { if (typeof utools !== 'undefined' && utools.showMainWindow) utools.showMainWindow() } catch (e) {}
+    })
+
+    // ============ 切换追踪 ============
+    function toggleTracking() {
+      console.log('[FocusFlow Float] toggleTracking')
+      sendCmd({ type: 'toggle-tracking' })
+    }
+
+    // ============ 渲染状态 ============
+    function renderTracking(tracking) {
+      if (tracking) btn.classList.add('tracking')
+      else btn.classList.remove('tracking')
+    }
+    window.focusflowUpdateTrackingState = renderTracking
+
+    if (ipcRenderer) {
+      ipcRenderer.on('focusflow:tracking-state', (_e, payload) => {
+        renderTracking(!!(payload && payload.tracking))
+      })
+    }
+    window.addEventListener('message', (e) => {
+      if (e && e.data && e.data.type === 'focusflow:tracking-state') {
+        renderTracking(!!e.data.tracking)
+      }
+    })
+
+    // ============ 轮询读取追踪状态（兜底） ============
+    let _lastTs = 0
+    function pollTrackingState() {
+      if (!utoolsDb) return
+      try {
+        const doc = utoolsDb.get('focusflow/tracking-state')
+        if (doc && typeof doc.tracking === 'boolean' && doc.ts && doc.ts !== _lastTs) {
+          _lastTs = doc.ts
+          renderTracking(doc.tracking)
+        }
+      } catch (e) {}
+    }
+    setInterval(pollTrackingState, 500)
+    // 立即读一次
+    setTimeout(pollTrackingState, 50)
+  </script>
+</body>
+</html>

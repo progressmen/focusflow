@@ -33,6 +33,8 @@ class SettingsService {
       notifications: true,
       // 截图间隔（秒），最小 5 秒，最大 600 秒
       screenshotInterval: 30,
+      // 是否启用桌面悬浮图标（独立悬浮窗，显示追踪状态 + 一键开关）
+      floatingIcon: false,
 
       // 分类设置（描述更具体、避免与「工作」字面重叠；defaultCategory 留空更稳）
       categories: [
@@ -516,7 +518,9 @@ class SettingsService {
         typeof settings.autoStart === 'boolean' ? settings.autoStart : this.defaultSettings.autoStart,
       notifications:
         typeof settings.notifications === 'boolean' ? settings.notifications : this.defaultSettings.notifications,
-      screenshotInterval: settings.screenshotInterval || this.defaultSettings.screenshotInterval
+      screenshotInterval: settings.screenshotInterval || this.defaultSettings.screenshotInterval,
+      floatingIcon:
+        typeof settings.floatingIcon === 'boolean' ? settings.floatingIcon : this.defaultSettings.floatingIcon
     }
   }
 
@@ -531,6 +535,9 @@ class SettingsService {
     settings.notifications = trackingSettings.notifications
     if (trackingSettings.screenshotInterval) {
       settings.screenshotInterval = trackingSettings.screenshotInterval
+    }
+    if (typeof trackingSettings.floatingIcon === 'boolean') {
+      settings.floatingIcon = trackingSettings.floatingIcon
     }
     return this.saveSettings(settings)
   }
