@@ -160,24 +160,28 @@
             />
           </div>
 
-          <div v-if="providerForm.mode !== 'preset' || providerForm.data.protocol === 'openai'" class="form-group">
+          <div class="form-group">
             <label>协议</label>
-            <select v-model="providerForm.data.protocol" class="form-input" :disabled="providerForm.mode === 'preset'">
+            <select v-model="providerForm.data.protocol" class="form-input" @change="onProtocolChange">
               <option value="openai">OpenAI 兼容（chat completions）</option>
               <option value="claude">Anthropic Claude SDK</option>
             </select>
+            <small class="form-help">同一服务商可按 OpenAI 兼容或 Anthropic SDK 方式接入</small>
           </div>
 
-          <div v-if="providerForm.data.protocol === 'openai'" class="form-group">
-            <label>Base URL <span class="required">*</span></label>
+          <div v-if="providerForm.data.protocol === 'openai' || providerForm.data.protocol === 'claude'" class="form-group">
+            <label>
+              Base URL <span class="required">*</span>
+            </label>
             <input
               v-model="providerForm.data.baseURL"
               type="text"
               class="form-input"
-              placeholder="https://api.example.com/v1"
+              :placeholder="providerForm.data.protocol === 'claude' ? 'https://api.anthropic.com 或中转地址' : 'https://api.example.com/v1'"
               spellcheck="false"
             />
-            <small class="form-help">不要带尾部 /chat/completions，只填到 v1 这一级</small>
+            <small v-if="providerForm.data.protocol === 'openai'" class="form-help">不要带尾部 /chat/completions，只填到 v1 这一级</small>
+            <small v-else class="form-help">官方地址 https://api.anthropic.com 或代理/中转服务地址</small>
           </div>
 
           <div v-if="providerForm.data.protocol === 'openai' && providerForm.data.chatPath" class="form-group">
@@ -222,13 +226,7 @@
                 class="form-input"
                 spellcheck="false"
                 placeholder="如：gpt-4o-mini / llama3.2 / claude-3-5-sonnet-20241022"
-                list="form-model-options"
               />
-              <datalist id="form-model-options">
-                <option v-for="m in providerForm.modelOptions" :key="m.id" :value="m.id">
-                  {{ m.label || m.id }}
-                </option>
-              </datalist>
               <button
                 class="btn btn-secondary btn-sm"
                 type="button"
@@ -238,6 +236,16 @@
                 {{ formFetchingModels ? '获取中…' : '🔄 拉取模型' }}
               </button>
             </div>
+            <select
+              v-if="providerForm.modelOptions && providerForm.modelOptions.length"
+              v-model="providerForm.data.model"
+              class="form-input model-select"
+            >
+              <option value="" disabled>从拉取到的模型中选择…</option>
+              <option v-for="m in providerForm.modelOptions" :key="m.id" :value="m.id">
+                {{ m.label || m.id }}
+              </option>
+            </select>
           </div>
 
           <div class="form-group">
@@ -579,6 +587,20 @@ function closeProviderForm() {
   providerForm.testResult = null
 }
 
+function onProtocolChange() {
+  // preset 模式下切换协议时，联动 baseURL / chatPath（保留 name/apiKey/model）
+  if (providerForm.mode === 'preset' && providerForm.presetKey) {
+    const meta = presetCatalog[providerForm.presetKey] || {}
+    if (providerForm.data.protocol === 'openai') {
+      providerForm.data.baseURL = meta.baseURL || ''
+      providerForm.data.chatPath = meta.chatPath || ''
+    } else if (providerForm.data.protocol === 'claude') {
+      providerForm.data.baseURL = 'https://api.anthropic.com'
+      providerForm.data.chatPath = ''
+    }
+  }
+}
+
 function applyPresetTemplate(key, meta) {
   providerForm.presetKey = key
   providerForm.data = makeEmptyProviderData({
@@ -646,6 +668,7 @@ function validateProviderForm() {
   if (!d.name || !d.name.trim()) return '请填写名称'
   if (!d.protocol) return '请选择协议'
   if (d.protocol === 'openai' && !d.baseURL) return '请填写 Base URL'
+  if (d.protocol === 'claude' && !d.baseURL) return '请填写 Base URL'
   if (!d.model) return '请填写模型 ID'
   if (d.type !== 'local' && !d.apiKey) {
     return d.protocol === 'claude' ? 'Claude 需要 API Key' : '请填写 API Key（本地服务可改类型为「本地」）'
@@ -1950,6 +1973,12 @@ onMounted(() => {
   align-items: center;
 }
 .model-name-row .form-input { flex: 1; }
+
+.model-select {
+  margin-top: 8px;
+  width: 100%;
+  cursor: pointer;
+}
 
 .test-result {
   display: flex;

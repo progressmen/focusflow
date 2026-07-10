@@ -1160,11 +1160,23 @@ async function callVisionWithSensitiveRetry(provider, screenshots, instructionTe
 }
 
 /**
+ * 根据 provider 配置创建 Anthropic 客户端
+ * 若 provider.baseURL 为空则用官方默认地址，否则走代理/中转
+ */
+function createClaudeClient(provider) {
+  const opts = { apiKey: provider.apiKey, dangerouslyAllowBrowser: true }
+  if (provider.baseURL && String(provider.baseURL).trim()) {
+    opts.baseURL = String(provider.baseURL).trim()
+  }
+  return new Anthropic(opts)
+}
+
+/**
  * Claude SDK 调用（图片）
  * @param {string} systemOverride 可选 system prompt（覆盖默认）
  */
 async function callClaudeVision(provider, screenshots, instructionText, systemOverride) {
-  const client = new Anthropic({ apiKey: provider.apiKey, dangerouslyAllowBrowser: true })
+  const client = createClaudeClient(provider)
   const content = []
   let skipped = 0
   for (let i = 0; i < screenshots.length; i++) {
@@ -1199,7 +1211,7 @@ async function callClaudeVision(provider, screenshots, instructionText, systemOv
  * Claude SDK 调用（纯文本）
  */
 async function callClaudeText(provider, prompt, opts = {}) {
-  const client = new Anthropic({ apiKey: provider.apiKey, dangerouslyAllowBrowser: true })
+  const client = createClaudeClient(provider)
   const response = await client.messages.create({
     model: provider.model,
     max_tokens: opts.maxTokens || 1500,
@@ -1386,7 +1398,7 @@ AIService.prototype.pingProvider = async function (provider) {
   if (provider.protocol === 'claude') {
     if (!provider.apiKey) return { ok: false, message: '未配置 API Key' }
     try {
-      const client = new Anthropic({ apiKey: provider.apiKey, dangerouslyAllowBrowser: true })
+      const client = createClaudeClient(provider)
       await client.messages.create({
         model: provider.model,
         max_tokens: 8,
@@ -1411,42 +1423,59 @@ AIService.prototype.pingProvider = async function (provider) {
 }
 
 /**
- * 拉取 provider 的可用模型列表（OpenAI 兼容服务支持 GET /models）
+ * 从 provider.baseURL 拉取可用模型列表（OpenAI /v1/models 风格）
+ * 同时兼容 Bearer 与 Anthropic 风格鉴权，适配代理/中转服务
+ */
+async function _fetchModelsFromURL(provider) {
+  const base = String(provider.baseURL || '').trim().replace(/\/+$/, '')
+  if (!base) return []
+  const headers = {}
+  if (provider.apiKey) {
+    headers['Authorization'] = `Bearer ${provider.apiKey}`
+    headers['x-api-key'] = provider.apiKey
+  }
+  if (provider.protocol === 'claude') {
+    headers['anthropic-version'] = '2023-06-01'
+  }
+  const candidates = [`${base}/v1/models`, `${base}/models`]
+  for (const url of candidates) {
+    try {
+      const resp = await fetch(url, { method: 'GET', headers })
+      if (!resp.ok) continue
+      const data = await resp.json()
+      const arr = data?.data || data?.models || []
+      const list = arr.map((m) => ({
+        id: m.id || m.model || m.name,
+        label: m.id || m.model || m.name
+      })).filter((m) => m.id)
+      if (list.length) return list
+    } catch (e) {
+      // 尝试下一个候选地址
+    }
+  }
+  // Ollama 还有专门的 /api/tags 接口
+  if (base.includes('11434')) {
+    try {
+      const tagUrl = base.replace(/\/v1\/?$/, '') + '/api/tags'
+      const r2 = await fetch(tagUrl)
+      if (r2.ok) {
+        const j2 = await r2.json()
+        return (j2?.models || []).map((m) => ({ id: m.name || m.model, label: m.name || m.model }))
+      }
+    } catch (e) {}
+  }
+  return []
+}
+
+/**
+ * 拉取 provider 的可用模型列表
+ *  - Claude 协议：去配置的 baseURL 真实拉取，拉取失败返回空（不兜底）
+ *  - OpenAI 兼容协议：GET {baseURL}/models
  */
 AIService.prototype.listModelsByProvider = async function (provider) {
   if (!provider) return []
-  if (provider.protocol === 'claude') {
-    // Claude 没有公开 list models 接口，返回内置静态列表
-    return CLAUDE_MODEL_OPTIONS
-  }
   if (!provider.baseURL) return []
-  try {
-    const url = joinUrl(provider.baseURL, '/models')
-    const headers = {}
-    if (provider.apiKey) headers['Authorization'] = `Bearer ${provider.apiKey}`
-    const resp = await fetch(url, { method: 'GET', headers })
-    if (!resp.ok) {
-      // Ollama 还有专门的 /api/tags 接口
-      if (provider.baseURL.includes('11434')) {
-        const tagUrl = provider.baseURL.replace(/\/v1\/?$/, '') + '/api/tags'
-        const r2 = await fetch(tagUrl)
-        if (r2.ok) {
-          const j2 = await r2.json()
-          return (j2?.models || []).map((m) => ({ id: m.name || m.model, label: m.name || m.model }))
-        }
-      }
-      return []
-    }
-    const data = await resp.json()
-    const arr = data?.data || data?.models || []
-    return arr.map((m) => ({
-      id: m.id || m.model || m.name,
-      label: m.id || m.model || m.name
-    })).filter((m) => m.id)
-  } catch (e) {
-    console.warn('[FocusFlow] listModelsByProvider 失败：', e)
-    return []
-  }
+  return _fetchModelsFromURL(provider)
 }
 
 export default AIService

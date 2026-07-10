@@ -406,8 +406,9 @@ class SettingsService {
     const settings = this.loadSettings()
     let list = Array.isArray(settings.providers) ? settings.providers.slice() : []
 
-    // 迁移：旧版 apiKeys.claude/minimax/kimi 自动生成 preset providers（仅在 providers 空且旧字段非空时）
-    if (list.length === 0 && settings.apiKeys && typeof settings.apiKeys === 'object') {
+    // 迁移：旧版 apiKeys.claude/minimax/kimi 自动生成 preset providers
+    // 仅在「尚未迁移过」且「旧字段非空」时执行一次，之后即使 providers 为空也不再重复迁移
+    if (!settings.providersMigrated && settings.apiKeys && typeof settings.apiKeys === 'object') {
       const legacyMap = [
         { key: 'claude', meta: this._presetMeta('claude') },
         { key: 'minimax', meta: this._presetMeta('minimax') },
@@ -429,7 +430,8 @@ class SettingsService {
           })
         }
       }
-      // 一次性回写
+      // 标记已迁移，无论是否生成了 provider 都置 true，避免反复迁移
+      settings.providersMigrated = true
       if (list.length > 0) {
         settings.providers = list
         if (!settings.activeProviderId && settings.aiModel) {
@@ -437,8 +439,8 @@ class SettingsService {
           const preset = legacyMap.find((m) => m.key === settings.aiModel)
           if (preset && preset.meta) settings.activeProviderId = preset.meta.id
         }
-        this.saveSettings(settings)
       }
+      this.saveSettings(settings)
     }
     return list
   }
@@ -559,7 +561,7 @@ SettingsService.PRESETS = {
     id: 'claude-default',
     name: 'Claude (Anthropic)',
     protocol: 'claude',
-    baseURL: '',
+    baseURL: 'https://api.anthropic.com',
     defaultModel: 'claude-3-5-sonnet-20241022',
     vision: true,
     models: [
