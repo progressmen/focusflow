@@ -465,7 +465,7 @@ onBeforeUnmount(() => {
   }
   // 注意：不要在组件卸载时停止 activityTracker
   // uTools 插件在隐藏 / 切换时可能会卸载视图，但用户期望追踪持续在后台
-  // 真正的停止只应通过用户点击「停止追踪」或快捷命令「关闭记录」触发
+  // 真正的停止只应通过用户点击「停止追踪」或快捷命令「停止记录」触发
 })
 
 // 监听 utools:enter 事件
@@ -500,8 +500,8 @@ async function handlePluginEnter(detail) {
   const typedCmd = detail && detail.payload
 
   const cmd = String(typedCmd || '').replace(/\s+/g, '').toLowerCase()
-  const startCmds = ['开始记录', '开启记录', 'focusflow开始', 'starttracking']
-  const stopCmds = ['停止记录', '关闭记录', 'focusflow停止', 'stoptracking']
+  const startCmds = ['开始记录']
+  const stopCmds = ['停止记录']
   const isShortcut = code === 'FocusFlow' && (startCmds.includes(cmd) || stopCmds.includes(cmd))
 
   // 快捷命令时，等 preload 端执行完毕后同步 UI

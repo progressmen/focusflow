@@ -183,8 +183,8 @@ if (typeof utools !== 'undefined') {
         return
       }
       const cmd = String(typedCmd || '').replace(/\s+/g, '').toLowerCase()
-      const startCmds = ['开始记录', '开启记录', 'focusflow开始', 'starttracking']
-      const stopCmds = ['停止记录', '关闭记录', 'focusflow停止', 'stoptracking']
+      const startCmds = ['开始记录']
+      const stopCmds = ['停止记录']
       const isStart = startCmds.includes(cmd)
       const isStop = stopCmds.includes(cmd)
 
@@ -213,8 +213,8 @@ if (typeof utools !== 'undefined') {
   // 判断是否为开始/停止命令（用于 UI 侧同步）
   function _resolveCommandType(typedCmd) {
     const cmd = String(typedCmd || '').replace(/\s+/g, '').toLowerCase()
-    const startCmds = ['开始记录', '开启记录', 'focusflow开始', 'starttracking']
-    const stopCmds = ['停止记录', '关闭记录', 'focusflow停止', 'stoptracking']
+    const startCmds = ['开始记录']
+    const stopCmds = ['停止记录']
     if (startCmds.includes(cmd)) return 'start'
     if (stopCmds.includes(cmd)) return 'stop'
     return 'main'
