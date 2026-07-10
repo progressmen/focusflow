@@ -22,16 +22,10 @@ console.log('After mount - #app content:', document.getElementById('app').innerH
 // uTools 插件生命周期
 if (typeof utools !== 'undefined') {
   console.log('uTools API available')
-  
-  // 插件进入时
-  utools.onPluginEnter(({ code, type, payload }) => {
-    console.log('Plugin entered:', { code, type, payload })
-  })
 
-  // 插件退出时
-  utools.onPluginOut(() => {
-    console.log('Plugin exited')
-  })
+  // onPluginEnter / onPluginOut 已由 preload.js 统一注册处理
+  // （preload.js 会缓存 payload、派发 utools:enter 事件并执行开始/停止快捷命令）
+  // 这里切勿再次注册，否则会覆盖 preload.js 中的回调，导致快捷开关失效
 
   // 插件隐藏时 - 注意：utools.onPluginHide 方法可能不存在，使用try-catch包裹
   try {
