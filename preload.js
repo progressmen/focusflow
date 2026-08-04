@@ -687,7 +687,9 @@ if (typeof utools !== 'undefined') {
           detail: cur.detail || '',
           // 时段固定显示为 "HH:mm - HH:mm"（开始时间 + 10 分钟）
           time: formatTimeslotRange(rounded),
-          screenshots
+          screenshots,
+          // 保留上次 AI 分析时的截图数，用于判断是否有新增截图需要重新分析
+          analyzedShotCount: typeof cur.analyzedShotCount === 'number' ? cur.analyzedShotCount : 0
         }
         if (cur._rev) timeslotDoc._rev = cur._rev
         const tRes = utools.db.put(timeslotDoc)
@@ -823,7 +825,11 @@ if (typeof utools !== 'undefined') {
         detail: (data && data.detail) || cur.detail || '',
         // 时段固定为 "HH:mm - HH:mm"（开始时间 + 10 分钟），忽略调用方传入的 time
         time: formatTimeslotRange(roundedSeconds),
-        screenshots: (data && data.screenshots) || cur.screenshots || []
+        screenshots: (data && data.screenshots) || cur.screenshots || [],
+        // 记录本次分析时的截图数量，用于后续判断是否有新增截图
+        analyzedShotCount: typeof (data && data.analyzedShotCount) === 'number'
+          ? data.analyzedShotCount
+          : (typeof cur.analyzedShotCount === 'number' ? cur.analyzedShotCount : 0)
       }
       if (cur._rev) doc._rev = cur._rev
       const res = utools.db.put(doc)
@@ -962,7 +968,8 @@ if (typeof utools !== 'undefined') {
             detail: s.detail || '',
             categories: Array.isArray(s.categories) ? s.categories : [],
             time: s.time || '',
-            screenshots: Array.isArray(s.screenshots) ? s.screenshots : []
+            screenshots: Array.isArray(s.screenshots) ? s.screenshots : [],
+            analyzedShotCount: typeof s.analyzedShotCount === 'number' ? s.analyzedShotCount : 0
           })
         }
       } catch (e) {
@@ -1087,7 +1094,8 @@ if (typeof utools !== 'undefined') {
             detail: s.detail || '',
             categories: Array.isArray(s.categories) ? s.categories : [],
             time: s.time || '',
-            screenshots: Array.isArray(s.screenshots) ? s.screenshots : []
+            screenshots: Array.isArray(s.screenshots) ? s.screenshots : [],
+            analyzedShotCount: typeof s.analyzedShotCount === 'number' ? s.analyzedShotCount : 0
           })) imported.timeslots++
         } catch (e) {
           console.warn('import timeslot 失败:', s._id, e)
@@ -1356,7 +1364,7 @@ if (typeof utools !== 'undefined') {
           }
           if (shouldUpdate) {
             try {
-              utools.db.put({ ...slot, screenshots: [] })
+              utools.db.put({ ...slot, screenshots: [], analyzedShotCount: 0 })
             } catch (e) {
               console.error('clearScreenshotsOnly 清空 timeslot.screenshots 失败:', slot._id, e)
             }
@@ -1844,7 +1852,8 @@ if (typeof utools !== 'undefined') {
           detail: s.detail || '',
           categories: s.categories || [],
           time: s.time || '',
-          screenshots: s.screenshots || []
+          screenshots: s.screenshots || [],
+          analyzedShotCount: typeof s.analyzedShotCount === 'number' ? s.analyzedShotCount : 0
         })
         imported.timeslots++
       }

@@ -259,8 +259,8 @@
           <div v-if="slotScreenshots.length > 0" class="screenshot-video-section">
             <h4>截图回放（{{ slotScreenshots.length }} 张）</h4>
             <div class="video-controls">
-              <button class="btn btn-primary" @click="togglePlay">
-                {{ isPlaying ? '暂停' : '播放' }}
+              <button class="btn btn-primary" @click="togglePlay" :title="isPlaying ? '暂停 (空格)' : '播放 (空格)'">
+                {{ isPlaying ? '⏸ 暂停' : '▶ 播放' }}
               </button>
               <input
                 type="range"
@@ -269,22 +269,59 @@
                 :max="slotScreenshots.length - 1"
                 class="progress-bar"
               />
-              <span>{{ screenshotIndex + 1 }} / {{ slotScreenshots.length }}</span>
+              <span class="shot-counter">{{ screenshotIndex + 1 }} / {{ slotScreenshots.length }}</span>
+              <select v-model.number="playSpeed" class="speed-select" :title="'播放速度'">
+                <option :value="2000">0.5×</option>
+                <option :value="1500">1×</option>
+                <option :value="800">2×</option>
+              </select>
             </div>
             <div class="video-preview" v-if="currentScreenshot">
-              <img
-                v-if="currentScreenshot.imageData"
-                :src="currentScreenshot.imageData"
-                class="video-img"
-                alt="screenshot"
-                @error="onImgError"
-              />
-              <div v-else class="video-img video-img-placeholder">
-                <span>截图加载失败或为空</span>
+              <div class="shot-stage">
+                <button
+                  class="nav-btn nav-prev"
+                  :disabled="screenshotIndex === 0"
+                  @click="prevShot"
+                  title="上一张 (←)"
+                >‹</button>
+                <div class="shot-canvas" @click="openZoom" :title="'点击查看大图'">
+                  <div v-if="imgLoading" class="shot-loading"><span class="spinner"></span>加载中…</div>
+                  <img
+                    v-if="currentScreenshot.imageData && !imgError"
+                    :src="currentScreenshot.imageData"
+                    class="video-img is-zoomable"
+                    alt="screenshot"
+                    @load="onImgLoad"
+                    @error="onImgError"
+                  />
+                  <div v-if="imgError || !currentScreenshot.imageData" class="video-img video-img-placeholder">
+                    <span>⚠ 截图加载失败或为空</span>
+                  </div>
+                  <span class="zoom-hint" v-if="!imgError">🔍 点击放大</span>
+                </div>
+                <button
+                  class="nav-btn nav-next"
+                  :disabled="screenshotIndex === slotScreenshots.length - 1"
+                  @click="nextShot"
+                  title="下一张 (->)"
+                >›</button>
               </div>
               <div class="video-info">
-                <span>{{ currentScreenshot.app }}</span>
-                <span>{{ currentScreenshot.time }}</span>
+                <span class="app-name">{{ currentScreenshot.app }}</span>
+                <span class="shot-time">{{ currentScreenshot.time }}</span>
+              </div>
+            </div>
+            <div class="thumb-strip" v-if="slotScreenshots.length > 1">
+              <div
+                v-for="(sc, idx) in slotScreenshots"
+                :key="sc.docId || idx"
+                class="thumb-item"
+                :class="{ active: idx === screenshotIndex }"
+                @click="jumpTo(idx)"
+                :title="sc.time"
+              >
+                <img v-if="sc.imageData" :src="sc.imageData" alt="thumb" />
+                <div v-else class="thumb-empty">×</div>
               </div>
             </div>
           </div>
@@ -292,7 +329,39 @@
       </div>
     </div>
 
-    <!-- 清空数据弹窗已迁移到「设置 → 数据管理」 -->
+    <!-- 截图大图查看器 -->
+    <div v-if="showZoom" class="zoom-overlay" @click="closeZoom">
+      <div class="zoom-stage" @click.stop>
+        <button class="zoom-close" @click="closeZoom" title="关闭 (Esc)">×</button>
+        <button
+          class="nav-btn nav-prev zoom-nav"
+          :disabled="screenshotIndex === 0"
+          @click="prevShot"
+          title="上一张 (←)"
+        >‹</button>
+        <img
+          v-if="currentScreenshot && currentScreenshot.imageData"
+          :src="currentScreenshot.imageData"
+          class="zoom-img"
+          alt="screenshot"
+          @click="closeZoom"
+        />
+        <div v-else class="zoom-empty">截图不可用</div>
+        <button
+          class="nav-btn nav-next zoom-nav"
+          :disabled="screenshotIndex === slotScreenshots.length - 1"
+          @click="nextShot"
+          title="下一张 (->)"
+        >›</button>
+        <div class="zoom-info" v-if="currentScreenshot">
+          <span>{{ currentScreenshot.app }}</span>
+          <span>{{ screenshotIndex + 1 }} / {{ slotScreenshots.length }}</span>
+          <span>{{ currentScreenshot.time }}</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- 清空数据弹窗已迁移到「设置 -> 数据管理」 -->
   </div>
 </template>
 
@@ -375,6 +444,10 @@ const slotScreenshots = ref([])
 const screenshotIndex = ref(0)
 const isPlaying = ref(false)
 let playTimer = null
+const playSpeed = ref(1500)
+const showZoom = ref(false)
+const imgLoading = ref(false)
+const imgError = ref(false)
 
 // 清空数据相关 state 已移至 SettingsPanel
 
@@ -406,6 +479,8 @@ onMounted(async () => {
   window.addEventListener('focusflow:tracking-changed', onTrackingChanged)
   // 监听浏览器/插件页面重新可见
   document.addEventListener('visibilitychange', onVisibilityChange)
+  // 截图查看器键盘快捷键
+  window.addEventListener('keydown', onDetailKeydown)
   // 启动每秒滴答（仅用于更新「N 秒前」文案）
   nowTickTimer = setInterval(() => {
     nowTick.value = Date.now()
@@ -457,6 +532,7 @@ onBeforeUnmount(() => {
     nowTickTimer = null
   }
   document.removeEventListener('visibilitychange', onVisibilityChange)
+  window.removeEventListener('keydown', onDetailKeydown)
   window.removeEventListener('utools:enter', onUtoolsEnter)
   window.removeEventListener('focusflow:tracking-changed', onTrackingChanged)
   if (typeof unsubscribeAnalysisState === 'function') {
@@ -807,10 +883,12 @@ async function openTimelineDetail(item) {
   showDetail.value = true
   slotScreenshots.value = await activityTracker.loadScreenshotsForSlot(item.id)
   screenshotIndex.value = 0
+  resetImgState()
 }
 
 function closeDetail() {
   stopPlay()
+  closeZoom()
   showDetail.value = false
   selectedItem.value = null
   slotScreenshots.value = []
@@ -821,8 +899,53 @@ const currentScreenshot = computed(() => {
   return slotScreenshots.value[screenshotIndex.value]
 })
 
+function resetImgState() {
+  imgLoading.value = !!currentScreenshot.value && !!currentScreenshot.value.imageData
+  imgError.value = false
+}
+
+function onImgLoad() {
+  imgLoading.value = false
+}
+
 function onImgError(e) {
+  imgLoading.value = false
+  imgError.value = true
   console.error('截图渲染失败:', currentScreenshot.value && currentScreenshot.value.docId)
+}
+
+// 监听索引变化，重置加载/错误状态
+watch(screenshotIndex, () => {
+  resetImgState()
+})
+
+function prevShot() {
+  if (screenshotIndex.value > 0) {
+    screenshotIndex.value--
+  }
+}
+
+function nextShot() {
+  if (screenshotIndex.value < slotScreenshots.value.length - 1) {
+    screenshotIndex.value++
+  }
+}
+
+function jumpTo(idx) {
+  if (idx >= 0 && idx < slotScreenshots.value.length) {
+    screenshotIndex.value = idx
+  }
+}
+
+function openZoom() {
+  if (currentScreenshot.value && currentScreenshot.value.imageData) {
+    stopPlay()
+    showZoom.value = true
+  }
+}
+
+function closeZoom() {
+  showZoom.value = false
 }
 
 function togglePlay() {
@@ -835,17 +958,64 @@ function togglePlay() {
 
 function startPlay() {
   if (!slotScreenshots.value.length) return
+  if (slotScreenshots.value.length === 1) return
+  // 已播放到最后一张时，重新从第一张开始
+  if (screenshotIndex.value >= slotScreenshots.value.length - 1) {
+    screenshotIndex.value = 0
+  }
   isPlaying.value = true
   playTimer = setInterval(() => {
+    // 播放到最后一张自动停止，避免无限循环
+    if (screenshotIndex.value >= slotScreenshots.value.length - 1) {
+      stopPlay()
+      return
+    }
     screenshotIndex.value = (screenshotIndex.value + 1) % slotScreenshots.value.length
-  }, 1500)
+  }, playSpeed.value)
 }
+
+// 播放速度变化时若正在播放则重启定时器
+watch(playSpeed, () => {
+  if (isPlaying.value) {
+    stopPlay()
+    startPlay()
+  }
+})
 
 function stopPlay() {
   isPlaying.value = false
   if (playTimer) {
     clearInterval(playTimer)
     playTimer = null
+  }
+}
+
+// 键盘快捷键：弹窗内 ←/-> 翻页、空格 播放/暂停、Esc 关闭
+function onDetailKeydown(e) {
+  if (!showDetail.value && !showZoom.value) return
+  const tag = (e.target && e.target.tagName) || ''
+  if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return
+  switch (e.key) {
+    case 'ArrowLeft':
+      e.preventDefault()
+      prevShot()
+      break
+    case 'ArrowRight':
+      e.preventDefault()
+      nextShot()
+      break
+    case ' ':
+    case 'Spacebar':
+      e.preventDefault()
+      togglePlay()
+      break
+    case 'Escape':
+      if (showZoom.value) {
+        closeZoom()
+      } else {
+        closeDetail()
+      }
+      break
   }
 }
 
@@ -887,20 +1057,28 @@ async function refreshAll() {
     const appCount = new Map()
     const catCount = new Map()
     let total = 0
+    let appTotal = 0 // 排除 uTools 后用于应用百分比
     let unanalyzed = 0
     slots.forEach((s) => {
       s.screenshots.forEach((sc) => {
         const app = sc.app || '未知应用'
-        appCount.set(app, (appCount.get(app) || 0) + 1)
         total++
+        // uTools 自身（插件窗口前台时识别到的应用）不计入应用排行
+        if (isUtoolsApp(app)) return
+        appCount.set(app, (appCount.get(app) || 0) + 1)
+        appTotal++
       })
       // 分类按时段统计（一个时段算一次，多个分类各算一次）
-      if (Array.isArray(s.categories) && s.categories.length > 0) {
-        s.categories.forEach((c) => {
-          catCount.set(c, (catCount.get(c) || 0) + 1)
+      const cats = Array.isArray(s.categories) ? s.categories.filter((c) => c && String(c).trim()) : []
+      if (cats.length > 0) {
+        cats.forEach((c) => {
+          const name = String(c).trim()
+          catCount.set(name, (catCount.get(name) || 0) + 1)
         })
       } else {
         unanalyzed++
+        // AI 无法识别分类或尚未分析的时段，归为「未分类」并纳入饼图
+        catCount.set('未分类', (catCount.get('未分类') || 0) + 1)
       }
     })
 
@@ -908,7 +1086,7 @@ async function refreshAll() {
       .map(([name, count]) => ({
         name,
         count,
-        percent: total > 0 ? Math.floor((count / total) * 100) : 0
+        percent: appTotal > 0 ? Math.floor((count / appTotal) * 100) : 0
       }))
       .sort((a, b) => b.count - a.count)
     topApps.value = apps
@@ -925,7 +1103,7 @@ async function refreshAll() {
     topCategories.value = cats
     unanalyzedSlots.value = unanalyzed
 
-    // 图表数据：优先用分类统计；如果分类为空，则回退到应用统计
+    // 图表数据：优先用活动分类统计；分类为空时回退到应用统计（已排除 uTools）
     if (cats.length > 0) {
       chartData.value = cats.slice(0, 8).map((c) => ({ label: c.name, value: c.count, color: c.color }))
     } else {
@@ -958,6 +1136,8 @@ async function refreshAll() {
 
 // 从配置中找分类颜色，找不到给默认色
 function getCategoryColor(name) {
+  // 「未分类」固定用灰色，与其他分类区分
+  if (name === '未分类') return '#95a5a6'
   const found = categoriesConfig.value.find((c) => c.name === name)
   if (found && found.color) return found.color
   // 简单 hash 给个稳定的兜底色
@@ -965,6 +1145,13 @@ function getCategoryColor(name) {
   let h = 0
   for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) & 0xff
   return palette[h % palette.length]
+}
+
+// 判断是否为 uTools 自身（插件窗口前台时识别到的应用名，大小写不敏感）
+function isUtoolsApp(app) {
+  if (!app) return false
+  const n = String(app).trim().toLowerCase()
+  return n === 'utools' || n === 'u tools' || n === 'utool'
 }
 
 // 时间轴左侧标记的颜色（取第一个分类）
@@ -1259,7 +1446,7 @@ async function reanalyzeSlot(item) {
 
 .stats-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  grid-template-columns: repeat(4, 1fr);
   gap: 16px;
   margin-bottom: 24px;
 }
@@ -1269,6 +1456,7 @@ async function reanalyzeSlot(item) {
   border-radius: 8px;
   box-shadow: 0 2px 4px rgba(0, 0, 0, 0.08);
   text-align: center;
+  min-width: 0;
 }
 .stat-card h3 {
   margin: 0 0 8px 0;
@@ -1740,7 +1928,32 @@ async function reanalyzeSlot(item) {
   margin-bottom: 16px;
 }
 .progress-bar { flex: 1; accent-color: #3498db; }
+.shot-counter { font-size: 13px; color: #2c3e50; min-width: 56px; text-align: center; font-variant-numeric: tabular-nums; }
+.speed-select {
+  padding: 4px 6px;
+  border: 1px solid #d0d7de;
+  border-radius: 6px;
+  font-size: 12px;
+  color: #2c3e50;
+  background: #fff;
+  cursor: pointer;
+}
+.speed-select:focus { outline: none; border-color: #3498db; }
 .video-preview { background: #f8f9fa; padding: 12px; border-radius: 8px; border-left: 4px solid #3498db; }
+
+/* 截图舞台：左右翻页按钮 + 图片画布 */
+.shot-stage {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.shot-canvas {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  cursor: zoom-in;
+}
 .video-img {
   width: 100%;
   max-height: 480px;
@@ -1748,7 +1961,9 @@ async function reanalyzeSlot(item) {
   background: #222;
   border-radius: 6px;
   margin-bottom: 10px;
+  transition: filter 0.2s ease;
 }
+.shot-canvas:hover .video-img.is-zoomable { filter: brightness(0.92); }
 .video-img-placeholder {
   display: flex;
   align-items: center;
@@ -1757,12 +1972,184 @@ async function reanalyzeSlot(item) {
   color: #ecf0f1;
   font-size: 13px;
 }
+
+/* 翻页按钮 */
+.nav-btn {
+  flex: 0 0 auto;
+  width: 36px;
+  height: 36px;
+  border: none;
+  border-radius: 50%;
+  background: rgba(52, 152, 219, 0.12);
+  color: #3498db;
+  font-size: 26px;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s ease, transform 0.1s ease;
+}
+.nav-btn:hover:not(:disabled) { background: rgba(52, 152, 219, 0.28); }
+.nav-btn:active:not(:disabled) { transform: scale(0.9); }
+.nav-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+
+/* 加载与缩放提示 */
+.shot-loading {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #ecf0f1;
+  font-size: 13px;
+  background: rgba(0, 0, 0, 0.45);
+  padding: 8px 14px;
+  border-radius: 6px;
+  pointer-events: none;
+}
+.spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(255, 255, 255, 0.35);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: ff-spin 0.7s linear infinite;
+}
+@keyframes ff-spin { to { transform: rotate(360deg); } }
+.zoom-hint {
+  position: absolute;
+  bottom: 16px;
+  right: 10px;
+  font-size: 11px;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.5);
+  padding: 3px 8px;
+  border-radius: 4px;
+  opacity: 0;
+  transition: opacity 0.2s ease;
+  pointer-events: none;
+}
+.shot-canvas:hover .zoom-hint { opacity: 1; }
+
 .video-info { display: flex; justify-content: space-between; font-size: 13px; color: #2c3e50; }
+.video-info .app-name { font-weight: 600; }
+
+/* 缩略图条 */
+.thumb-strip {
+  display: flex;
+  gap: 8px;
+  margin-top: 14px;
+  padding: 10px;
+  background: #fff;
+  border: 1px solid #e1e5e9;
+  border-radius: 8px;
+  overflow-x: auto;
+}
+.thumb-item {
+  flex: 0 0 auto;
+  width: 64px;
+  height: 40px;
+  border-radius: 4px;
+  overflow: hidden;
+  cursor: pointer;
+  border: 2px solid transparent;
+  background: #222;
+  transition: border-color 0.15s ease, transform 0.1s ease;
+}
+.thumb-item:hover { transform: translateY(-2px); }
+.thumb-item.active { border-color: #3498db; }
+.thumb-item img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.thumb-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  color: #ecf0f1;
+  font-size: 16px;
+}
+
+/* 大图查看器 */
+.zoom-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 2000;
+  background: rgba(0, 0, 0, 0.88);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  animation: ff-fade 0.18s ease;
+}
+@keyframes ff-fade { from { opacity: 0; } to { opacity: 1; } }
+.zoom-stage {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  padding: 0 56px;
+  box-sizing: border-box;
+}
+.zoom-img {
+  max-width: 90%;
+  max-height: 86vh;
+  object-fit: contain;
+  border-radius: 6px;
+  cursor: zoom-out;
+  box-shadow: 0 8px 40px rgba(0, 0, 0, 0.6);
+}
+.zoom-empty {
+  color: #bdc3c7;
+  font-size: 15px;
+}
+.zoom-close {
+  position: absolute;
+  top: 16px;
+  right: 20px;
+  background: rgba(255, 255, 255, 0.12);
+  border: none;
+  color: #fff;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  font-size: 26px;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s ease;
+}
+.zoom-close:hover { background: rgba(255, 255, 255, 0.25); }
+.zoom-nav { background: rgba(255, 255, 255, 0.12); color: #fff; }
+.zoom-nav:hover:not(:disabled) { background: rgba(255, 255, 255, 0.25); }
+.zoom-info {
+  position: absolute;
+  bottom: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 20px;
+  font-size: 13px;
+  color: #ecf0f1;
+  background: rgba(0, 0, 0, 0.5);
+  padding: 6px 16px;
+  border-radius: 20px;
+}
 
 @media (max-width: 768px) {
   .app-header { flex-direction: column; align-items: flex-start; }
-  .stats-grid { grid-template-columns: repeat(2, 1fr); }
+  .stats-grid { gap: 8px; }
+  .stat-card { padding: 10px 6px; }
+  .stat-card h3 { font-size: 11px; }
+  .stat-value { font-size: 20px; }
   .app-usage { max-width: none; margin-left: 0; margin-top: 8px; }
   .video-controls { flex-wrap: wrap; }
+  .nav-btn { width: 32px; height: 32px; font-size: 22px; }
+  .zoom-stage { padding: 0 12px; }
 }
 </style>

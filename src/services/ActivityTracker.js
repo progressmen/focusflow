@@ -249,8 +249,18 @@ export class ActivityTracker {
 
       const slot = window.getTimelineSlot ? window.getTimelineSlot(prevSlotSec) : null
       if (!slot || !Array.isArray(slot.screenshots) || slot.screenshots.length === 0) return
-      // 已分析过则跳过
-      if (slot.title && slot.summary && Array.isArray(slot.categories) && slot.categories.length > 0) return
+
+      // 判断是否已分析过
+      const analyzed = slot.title && slot.summary && Array.isArray(slot.categories) && slot.categories.length > 0
+      if (analyzed) {
+        // 已分析：仅当记录了 analyzedShotCount 且有新增截图时才重新分析
+        // （未记录 analyzedShotCount 的旧数据视为已完整分析，跳过）
+        if (typeof slot.analyzedShotCount !== 'number') return
+        const hasNewShots = slot.screenshots.length > slot.analyzedShotCount
+        if (!hasNewShots) return
+        console.log('[FocusFlow] 时段有新增截图，重新分析:', prevSlotSec,
+          `${slot.analyzedShotCount} -> ${slot.screenshots.length}`)
+      }
 
       try {
         await this.analyzeSlot(prevSlotSec, { source: 'auto' })
@@ -360,6 +370,17 @@ export class ActivityTracker {
         throw new Error('AI 返回结果不是合法 JSON，已阻止写入时间轴。请查看控制台中的 [FocusFlow][AI] 原始输出日志，或更换非推理模型/关闭思考输出。')
       }
 
+      // AI 未给出有效分类（空或仅"未分类"）时，回退到用户配置的默认分类（兜底）
+      if (settings.defaultCategory) {
+        const realCats = (Array.isArray(result.categories) ? result.categories : [])
+          .map((c) => String(c).trim())
+          .filter((c) => c && c !== '未分类')
+        if (realCats.length === 0) {
+          result.categories = [settings.defaultCategory]
+          console.log('[FocusFlow] AI 未识别出分类，回退到默认分类:', settings.defaultCategory)
+        }
+      }
+
       // 写回 timeslot 文档
       try {
         if (typeof window.saveTimelineSlot === 'function') {
@@ -368,7 +389,9 @@ export class ActivityTracker {
             summary: result.summary,
             detail: result.detail,
             categories: result.categories,
-            time: timeLabel
+            time: timeLabel,
+            // 记录本次分析时的截图数量，便于时段结束后判断是否有新增截图
+            analyzedShotCount: slot.screenshots.length
           })
           if (!saved) {
             console.warn('[FocusFlow] 写回 timeslot 失败')
