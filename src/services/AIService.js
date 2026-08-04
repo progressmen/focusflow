@@ -1,5 +1,35 @@
 import Anthropic from '@anthropic-ai/sdk'
 
+// 带超时的 fetch 封装：避免 AI 端点挂起导致队列永久阻塞
+// 默认 120 秒超时；可通过 opts.timeoutMs 覆盖
+async function fetchWithTimeout(url, opts = {}, timeoutMs = 120000) {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
+  try {
+    const resp = await fetch(url, { ...opts, signal: controller.signal })
+    return resp
+  } catch (e) {
+    if (e && e.name === 'AbortError') {
+      const providerName = opts.__providerName || 'AI'
+      throw new Error(`${providerName} 请求超时（${timeoutMs / 1000}s）`)
+    }
+    throw e
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+// 创建带超时的 Anthropic 客户端（支持透传 baseURL 等自定义选项）
+function createAnthropicClient(apiKey, extraOpts = {}) {
+  return new Anthropic({
+    apiKey,
+    dangerouslyAllowBrowser: true,
+    timeout: extraOpts.timeoutMs || 120000,
+    maxRetries: 0,
+    ...(extraOpts.baseURL ? { baseURL: extraOpts.baseURL } : {})
+  })
+}
+
 // 各 provider 的内置默认模型名（用户未配置时使用）
 const DEFAULT_MODELS = {
   claude: 'claude-3-5-sonnet-20241022',
@@ -33,19 +63,13 @@ const isLikelyVisionModel = (id) => {
 class AIService {
   constructor() {
     this.apiKey = localStorage.getItem('focusflow-ai-api-key') || ''
-    this.client = this.apiKey ? new Anthropic({
-      apiKey: this.apiKey,
-      dangerouslyAllowBrowser: true
-    }) : null
+    this.client = this.apiKey ? createAnthropicClient(this.apiKey) : null
   }
 
   setApiKey(apiKey) {
     this.apiKey = apiKey
     localStorage.setItem('focusflow-ai-api-key', apiKey)
-    this.client = new Anthropic({
-      apiKey: apiKey,
-      dangerouslyAllowBrowser: true
-    })
+    this.client = createAnthropicClient(apiKey)
   }
 
   async generateReport(activityData) {
@@ -328,12 +352,13 @@ class AIService {
   async _listMiniMaxModels(apiKey) {
     let res
     try {
-      res = await fetch('https://api.minimaxi.com/v1/models', {
+      res = await fetchWithTimeout('https://api.minimaxi.com/v1/models', {
         method: 'GET',
         headers: {
           'Authorization': `Bearer ${apiKey}`,
           'Content-Type': 'application/json'
-        }
+        },
+        __providerName: 'MiniMax'
       })
     } catch (e) {
       throw new Error('MiniMax 网络请求失败：' + (e && e.message))
@@ -359,12 +384,13 @@ class AIService {
   async _listKimiModels(apiKey) {
     let res
     try {
-      res = await fetch('https://api.moonshot.cn/v1/models', {
+      res = await fetchWithTimeout('https://api.moonshot.cn/v1/models', {
         method: 'GET',
         headers: {
           'Authorization': `Bearer ${apiKey}`,
           'Content-Type': 'application/json'
-        }
+        },
+        __providerName: 'Kimi'
       })
     } catch (e) {
       throw new Error('Kimi 网络请求失败：' + (e && e.message))
@@ -404,7 +430,7 @@ class AIService {
     }
     if (model === 'claude') {
       try {
-        const client = new Anthropic({ apiKey, dangerouslyAllowBrowser: true })
+        const client = createAnthropicClient(apiKey)
         const r = await client.messages.create({
           model: testModel,
           max_tokens: 1,
@@ -423,7 +449,7 @@ class AIService {
           ? 'https://api.minimaxi.com/v1/text/chatcompletion_v2'
           : 'https://api.moonshot.cn/v1/chat/completions'
       try {
-        const res = await fetch(url, {
+        const res = await fetchWithTimeout(url, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -433,7 +459,8 @@ class AIService {
             model: testModel,
             messages: [{ role: 'user', content: 'ping' }],
             max_tokens: 1
-          })
+          }),
+          __providerName: model
         })
         if (!res.ok) {
           const err = await res.json().catch(() => ({}))
@@ -468,12 +495,13 @@ class AIService {
       // 构建 base64 图片 URL
       const imageUrl = `data:image/png;base64,${imageBase64}`
       
-      const response = await fetch('https://api.minimax.chat/v1/text/chatcompletion_v2', {
+      const response = await fetchWithTimeout('https://api.minimax.chat/v1/text/chatcompletion_v2', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${apiKey}`
         },
+        __providerName: 'MiniMax',
         body: JSON.stringify({
           model: 'MiniMax-M2.7',
           messages: [
@@ -580,7 +608,7 @@ class AIService {
 
   async _analyzeWithClaude(apiKey, screenshots, instructionText, modelName) {
     const finalModel = modelName || DEFAULT_MODELS.claude
-    const client = new Anthropic({ apiKey, dangerouslyAllowBrowser: true })
+    const client = createAnthropicClient(apiKey)
     const content = []
     let skipped = 0
     for (const s of screenshots) {
@@ -642,7 +670,7 @@ class AIService {
     console.log('[FocusFlow] MiniMax 请求：model=', finalModel, 'images=', content.length - 1)
     let response
     try {
-      response = await fetch('https://api.minimaxi.com/v1/text/chatcompletion_v2', {
+      response = await fetchWithTimeout('https://api.minimaxi.com/v1/text/chatcompletion_v2', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
         body: JSON.stringify({
@@ -650,7 +678,8 @@ class AIService {
           messages: [{ role: 'user', content }],
           max_tokens: 1000,
           temperature: 0.4
-        })
+        }),
+        __providerName: 'MiniMax'
       })
     } catch (e) {
       throw new Error('MiniMax 网络请求失败：' + (e && e.message))
@@ -685,7 +714,7 @@ class AIService {
     console.log('[FocusFlow] Kimi 请求：model=', finalModel, 'images=', content.length - 1)
     let response
     try {
-      response = await fetch('https://api.moonshot.cn/v1/chat/completions', {
+      response = await fetchWithTimeout('https://api.moonshot.cn/v1/chat/completions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
         body: JSON.stringify({
@@ -693,7 +722,8 @@ class AIService {
           messages: [{ role: 'user', content }],
           max_tokens: 1000,
           temperature: 0.4
-        })
+        }),
+        __providerName: 'Kimi'
       })
     } catch (e) {
       throw new Error('Kimi 网络请求失败：' + (e && e.message))
@@ -794,7 +824,7 @@ class AIService {
   }
 
   async _dailyReportClaude(apiKey, finalModel, prompt) {
-    const client = new Anthropic({ apiKey, dangerouslyAllowBrowser: true })
+    const client = createAnthropicClient(apiKey)
     try {
       const res = await client.messages.create({
         model: finalModel,
@@ -814,7 +844,7 @@ class AIService {
   async _dailyReportMiniMax(apiKey, finalModel, prompt) {
     let res
     try {
-      res = await fetch('https://api.minimaxi.com/v1/text/chatcompletion_v2', {
+      res = await fetchWithTimeout('https://api.minimaxi.com/v1/text/chatcompletion_v2', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
         body: JSON.stringify({
@@ -822,7 +852,8 @@ class AIService {
           messages: [{ role: 'user', content: prompt }],
           max_tokens: 1500,
           temperature: 0.6
-        })
+        }),
+        __providerName: 'MiniMax'
       })
     } catch (e) {
       throw new Error('MiniMax 网络请求失败：' + (e && e.message))
@@ -838,7 +869,7 @@ class AIService {
   async _dailyReportKimi(apiKey, finalModel, prompt) {
     let res
     try {
-      res = await fetch('https://api.moonshot.cn/v1/chat/completions', {
+      res = await fetchWithTimeout('https://api.moonshot.cn/v1/chat/completions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
         body: JSON.stringify({
@@ -846,7 +877,8 @@ class AIService {
           messages: [{ role: 'user', content: prompt }],
           max_tokens: 1500,
           temperature: 0.6
-        })
+        }),
+        __providerName: 'Kimi'
       })
     } catch (e) {
       throw new Error('Kimi 网络请求失败：' + (e && e.message))
@@ -954,14 +986,14 @@ function balancedJsonFromString(s) {
 
 // 从 AI 返回的文本中提取 JSON（容错：可能带 ```json ... ``` 围栏 / <think> 推理段）
 function parseAnalysisJson(text) {
-  if (!text) return { title: '', summary: '', detail: '', categories: [] }
+  if (!text) return { title: '', summary: '', detail: '', categories: [], _parseFailed: true }
   // 1. 先剥离 <think>...</think> 推理段
   const cleaned = stripThinkBlocks(text)
   // 2. 提取代码块内 / 文本末尾的最后一个平衡 JSON 对象
   const jsonStr = extractLastJsonObject(cleaned)
   if (!jsonStr) {
     console.warn('[FocusFlow] parseAnalysisJson 找不到 JSON，原文：', text)
-    return { title: '', summary: cleaned.slice(0, 80), detail: cleaned, categories: [] }
+    return { title: '', summary: '', detail: cleaned, categories: [], _parseFailed: true }
   }
   try {
     const obj = JSON.parse(jsonStr)
@@ -973,7 +1005,7 @@ function parseAnalysisJson(text) {
     }
   } catch (e) {
     console.error('parseAnalysisJson 失败:', e, '抽取的 JSON：', jsonStr, '原文：', text)
-    return { title: '', summary: text.slice(0, 80), detail: text, categories: [] }
+    return { title: '', summary: '', detail: text, categories: [], _parseFailed: true }
   }
 }
 
@@ -1019,12 +1051,26 @@ async function callOpenAICompatChat(provider, messages, extraBody = {}) {
     if (includeResponseFormat && responseFormat) {
       body.response_format = { type: responseFormat }
     }
-    const resp = await fetch(url, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(body)
-    })
-    return resp
+    // 加超时保护：避免 AI 端点挂起导致队列永久阻塞（默认 120 秒）
+    const controller = new AbortController()
+    const timeoutMs = provider.timeoutMs && Number(provider.timeoutMs) > 0 ? Number(provider.timeoutMs) : 120000
+    const timer = setTimeout(() => controller.abort(), timeoutMs)
+    try {
+      const resp = await fetch(url, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(body),
+        signal: controller.signal
+      })
+      return resp
+    } catch (e) {
+      if (e && e.name === 'AbortError') {
+        throw new Error(`${provider.name || provider.id} 请求超时（${timeoutMs / 1000}s）`)
+      }
+      throw e
+    } finally {
+      clearTimeout(timer)
+    }
   }
 
   let response
@@ -1164,11 +1210,11 @@ async function callVisionWithSensitiveRetry(provider, screenshots, instructionTe
  * 若 provider.baseURL 为空则用官方默认地址，否则走代理/中转
  */
 function createClaudeClient(provider) {
-  const opts = { apiKey: provider.apiKey, dangerouslyAllowBrowser: true }
+  const extraOpts = {}
   if (provider.baseURL && String(provider.baseURL).trim()) {
-    opts.baseURL = String(provider.baseURL).trim()
+    extraOpts.baseURL = String(provider.baseURL).trim()
   }
-  return new Anthropic(opts)
+  return createAnthropicClient(provider.apiKey, extraOpts)
 }
 
 /**
@@ -1594,7 +1640,7 @@ async function _fetchModelsFromURL(provider) {
   const candidates = [`${base}/v1/models`, `${base}/models`]
   for (const url of candidates) {
     try {
-      const resp = await fetch(url, { method: 'GET', headers })
+      const resp = await fetchWithTimeout(url, { method: 'GET', headers, __providerName: provider.name || provider.id })
       if (!resp.ok) continue
       const data = await resp.json()
       const arr = data?.data || data?.models || []
@@ -1611,7 +1657,7 @@ async function _fetchModelsFromURL(provider) {
   if (base.includes('11434')) {
     try {
       const tagUrl = base.replace(/\/v1\/?$/, '') + '/api/tags'
-      const r2 = await fetch(tagUrl)
+      const r2 = await fetchWithTimeout(tagUrl, { __providerName: 'Ollama' })
       if (r2.ok) {
         const j2 = await r2.json()
         return (j2?.models || []).map((m) => ({ id: m.name || m.model, label: m.name || m.model }))

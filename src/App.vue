@@ -462,6 +462,8 @@ const AUTO_REFRESH_INTERVAL = 10000 // 每 10 秒刷一次
 const lastRefreshAt = ref(0)
 const nowTick = ref(Date.now())
 let nowTickTimer = null
+// handlePluginEnter 中用于同步快捷命令状态的定时器句柄（onBeforeUnmount 时清理）
+let _enterSyncTimer = null
 // Tracker AI 分析状态订阅的取消函数
 let unsubscribeAnalysisState = null
 
@@ -536,6 +538,10 @@ onBeforeUnmount(() => {
     clearInterval(nowTickTimer)
     nowTickTimer = null
   }
+  if (_enterSyncTimer) {
+    clearTimeout(_enterSyncTimer)
+    _enterSyncTimer = null
+  }
   document.removeEventListener('visibilitychange', onVisibilityChange)
   window.removeEventListener('keydown', onDetailKeydown)
   window.removeEventListener('utools:enter', onUtoolsEnter)
@@ -587,7 +593,9 @@ async function handlePluginEnter(detail) {
 
   // 快捷命令时，等 preload 端执行完毕后同步 UI
   if (isShortcut) {
-    setTimeout(() => {
+    if (_enterSyncTimer) clearTimeout(_enterSyncTimer)
+    _enterSyncTimer = setTimeout(() => {
+      _enterSyncTimer = null
       isTracking.value = !!activityTracker.isTracking
       if (isTracking.value) {
         startAutoRefresh()
@@ -636,9 +644,15 @@ function isSameDay(a, b) {
 }
 
 // 当月份变化时，加载月份数据
+// 用 token 机制避免竞态：快速切换月份时只接受最后一次的回调结果
+let _monthLoadToken = 0
 watch([currentYear, currentMonth], async () => {
+  const token = ++_monthLoadToken
   const monthNum = currentMonth.value + 1
-  datesWithData.value = await activityTracker.getMonthData(currentYear.value, monthNum)
+  const result = await activityTracker.getMonthData(currentYear.value, monthNum)
+  // 若期间又切换了月份，丢弃本次结果
+  if (token !== _monthLoadToken) return
+  datesWithData.value = result
 })
 
 // ========== 日历方法 ==========
@@ -902,11 +916,9 @@ async function openTimelineDetail(item) {
     }
   })
   loadingScreenshots.value = false
-  // 不再调用 resetImgState()：图片已通过 @load 设置 imgLoading=false，
-  // 此处再调会因 src 未变而 @load 不触发，导致 imgLoading 卡在 true
-  if (slotScreenshots.value.length === 0) {
-    imgLoading.value = false
-  }
+  // 加载完成后必须重置图片状态：覆盖首项 imageData 为 null（附件丢失）的情况，
+  // 否则 imgLoading 会卡在 true（resetImgState 内部依赖 loadingScreenshots=false 才能正确判定）
+  resetImgState()
 }
 
 function closeDetail() {
@@ -1059,9 +1071,15 @@ function onDetailKeydown(e) {
 
 // ========== 数据刷新 ==========
 
+// refreshAll 并发防护：复用进行中的 Promise，避免并发调用交叉覆盖状态
+let _refreshAllPromise = null
+
 async function refreshAll() {
-  loading.value = true
-  try {
+  // 若已有 refreshAll 在进行中，复用该 Promise，避免并发交叉覆盖 UI 状态
+  if (_refreshAllPromise) return _refreshAllPromise
+  _refreshAllPromise = (async () => {
+    loading.value = true
+    try {
     // 加载分类配置（用于显示颜色）
     try {
       categoriesConfig.value = settingsService.loadCategories() || []
@@ -1169,7 +1187,10 @@ async function refreshAll() {
     console.error('refreshAll 失败:', e)
   } finally {
     loading.value = false
+    _refreshAllPromise = null
   }
+  })()
+  return _refreshAllPromise
 }
 
 // 从配置中找分类颜色，找不到给默认色

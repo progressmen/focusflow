@@ -90,28 +90,44 @@ export class ActivityTracker {
   async startTracking() {
     if (this.isTracking) return
     this.isTracking = true
-    this.currentApp = await this.detectCurrentApp()
-    this.startTime = Date.now()
-    this.currentSession = this.newSession(this.currentApp, this.startTime)
+    try {
+      this.currentApp = await this.detectCurrentApp()
+      // await 后需复查 isTracking：用户可能在 await 期间调用了 stopTracking
+      if (!this.isTracking) {
+        console.log('[FocusFlow] startTracking 在 await 期间被取消')
+        return
+      }
+      this.startTime = Date.now()
+      this.currentSession = this.newSession(this.currentApp, this.startTime)
 
-    // 每 3 秒检查一次应用切换
-    this.checkInterval = setInterval(() => this.tick(), 3000)
-    // 按设置启动截图定时器
-    this.screenshotIntervalMs = this.resolveScreenshotIntervalMs()
-    this.screenshotInterval = setInterval(() => this.takeAndSaveScreenshot(), this.screenshotIntervalMs)
-    console.log('[FocusFlow] 截图间隔:', this.screenshotIntervalMs / 1000, '秒')
+      // 每 3 秒检查一次应用切换
+      this.checkInterval = setInterval(() => this.tick(), 3000)
+      // 按设置启动截图定时器
+      this.screenshotIntervalMs = this.resolveScreenshotIntervalMs()
+      this.screenshotInterval = setInterval(() => this.takeAndSaveScreenshot(), this.screenshotIntervalMs)
+      console.log('[FocusFlow] 截图间隔:', this.screenshotIntervalMs / 1000, '秒')
 
-    // 立即先截一张，保证有数据
-    this.takeAndSaveScreenshot()
+      // 立即先截一张，保证有数据
+      this.takeAndSaveScreenshot()
 
-    // 启动「上一时段巡检」定时器：每分钟扫一次，确保即使没有新截图也能在跨入新时段后触发上段分析
-    this._startSlotSweepTimer()
-    // 立即跑一次（覆盖刚启动追踪时已经跨过整 10 分钟边界的场景）
-    setTimeout(() => this._sweepPreviousSlot(), 500)
+      // 启动「上一时段巡检」定时器：每分钟扫一次，确保即使没有新截图也能在跨入新时段后触发上段分析
+      this._startSlotSweepTimer()
+      // 立即跑一次（覆盖刚启动追踪时已经跨过整 10 分钟边界的场景）
+      // 保存句柄以便 stopTracking 能清理
+      this._initialSweepTimer = setTimeout(() => {
+        this._initialSweepTimer = null
+        if (this.isTracking) this._sweepPreviousSlot()
+      }, 500)
 
-    // 保存状态到设置
-    this.persistTrackingState()
-    console.log('[FocusFlow] 开始追踪:', this.currentApp)
+      // 保存状态到设置
+      this.persistTrackingState()
+      console.log('[FocusFlow] 开始追踪:', this.currentApp)
+    } catch (e) {
+      // 异常时回滚 isTracking，避免状态卡死
+      this.isTracking = false
+      console.error('[FocusFlow] startTracking 失败:', e)
+      throw e
+    }
   }
 
   /**
@@ -173,6 +189,19 @@ export class ActivityTracker {
     }
     // 关掉「上一时段巡检」定时器
     this._stopSlotSweepTimer()
+    // 清理启动时遗留的「立即跑一次」一次性定时器
+    if (this._initialSweepTimer) {
+      clearTimeout(this._initialSweepTimer)
+      this._initialSweepTimer = null
+    }
+    // 清理单图分析队列（含 base64 imageData，避免内存泄漏到下一会话）
+    this._singleShotQueue = []
+    this._singleShotBusy = false
+    // 清理分析中的 slot 集合（已发起但未完成的 AI 调用最终会触发 finally 自清理，这里只兜底）
+    if (this._analyzingSlots && this._analyzingSlots.size > 0) {
+      console.log('[FocusFlow] stopTracking: 清理', this._analyzingSlots.size, '个分析中 slot 标记')
+      this._analyzingSlots.clear()
+    }
 
     // 结束当前 session
     if (this.currentSession) {

@@ -625,12 +625,16 @@ if (typeof utools !== 'undefined') {
       const canvas = document.createElement('canvas')
       canvas.width = width
       canvas.height = height
-      const ctx = canvas.getContext('2d')
-      ctx.drawImage(video, 0, 0, width, height)
-      const dataUrl = canvas.toDataURL('image/png')
-
-      stream.getTracks().forEach((t) => t.stop())
-      return dataUrl
+      // 用 try/finally 保证 canvas 阶段抛错时 stream 也能被停止，避免系统级资源泄露
+      try {
+        const ctx = canvas.getContext('2d')
+        if (!ctx) throw new Error('canvas getContext 返回 null')
+        ctx.drawImage(video, 0, 0, width, height)
+        const dataUrl = canvas.toDataURL('image/png')
+        return dataUrl
+      } finally {
+        stream.getTracks().forEach((t) => t.stop())
+      }
     } catch (e) {
       console.error('captureScreen 失败:', e)
       return null
@@ -1176,27 +1180,24 @@ if (typeof utools !== 'undefined') {
       for (const sh of (payload.screenshots || [])) {
         if (!sh || !sh._id || !sh.dataUrl) continue
         try {
-          // 先写文档元数据
-          const doc = {
-            _id: sh._id,
-            app: sh.app || '',
-            time: sh.time || '',
-            timestamp: sh.timestamp || 0,
-            mime: sh.mime || 'image/png'
-          }
-          // 注意：postAttachment 会自动创建文档，不能先 put 否则 rev 冲突
-          // 这里覆盖现有文档：先删后写
-          try {
-            const cur = utools.db.get(sh._id)
-            if (cur) utools.db.remove(sh._id)
-          } catch (e) {}
+          // 元数据写入独立文档（与运行时一致，避免 db.put 覆盖含 _attachments 的截图文档导致附件丢失）
+          const metaDocId = sh._id.replace('screenshot/', 'screenshot_aimeta/')
+          const mime = sh.mime || 'image/png'
+          // 1) 先写附件（postAttachment 会自动创建/覆盖 screenshot 文档，无需先 remove）
           const bytes = dataUrlToUint8Array(sh.dataUrl)
-          const r2 = utools.db.postAttachment(sh._id, bytes, doc.mime)
-          if (!r2.ok) continue
-          // postAttachment 已建文档，再 put 一次补 metadata 字段（带最新 rev）
-          const cur2 = utools.db.get(sh._id)
-          if (cur2) {
-            utools.db.put({ ...doc, _rev: cur2._rev })
+          const r2 = utools.db.postAttachment(sh._id, bytes, mime)
+          if (!r2.ok) {
+            console.warn('import screenshot postAttachment 失败:', sh._id, r2.message)
+            continue
+          }
+          // 2) 元数据写入 aimeta 文档
+          try {
+            const existingMeta = utools.db.get(metaDocId) || { _id: metaDocId }
+            existingMeta.aiDescription = sh.aiDescription || ''
+            existingMeta.aiApp = sh.app || ''
+            utools.db.put(existingMeta)
+          } catch (e) {
+            console.warn('import screenshot 写 aimeta 失败:', sh._id, e)
           }
           imported.screenshots++
         } catch (e) {
