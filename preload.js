@@ -764,17 +764,16 @@ if (typeof utools !== 'undefined') {
     }
   }
 
-  // 更新截图文档的 AI 描述（单图分析结果）
-  window.updateScreenshotDescription = (screenshotDocId, description) => {
+  // 更新截图的 AI 描述和应用名（单图分析结果）
+  // 存储在独立文档中，避免修改截图文档（含 _attachments，db.put 不支持）
+  window.updateScreenshotDescription = (screenshotDocId, description, aiApp) => {
     try {
       if (!screenshotDocId) return false
-      const doc = utools.db.get(screenshotDocId)
-      if (!doc) {
-        console.warn('updateScreenshotDescription: 文档不存在', screenshotDocId)
-        return false
-      }
-      doc.aiDescription = description || ''
-      const res = utools.db.put(doc)
+      const metaId = screenshotDocId.replace('screenshot/', 'screenshot_aimeta/')
+      const existing = utools.db.get(metaId) || { _id: metaId }
+      existing.aiDescription = description || ''
+      if (aiApp) existing.aiApp = aiApp
+      const res = utools.db.put(existing)
       return !!(res && res.ok)
     } catch (e) {
       console.error('updateScreenshotDescription 失败:', e)
@@ -782,18 +781,17 @@ if (typeof utools !== 'undefined') {
     }
   }
 
-  // 获取截图文档的元信息（不含图片附件，用于文本总结）
+  // 获取截图的 AI 元信息（从独立的元数据文档读取）
   window.getScreenshotMetaFromDb = (screenshotDocId) => {
     try {
       if (!screenshotDocId) return null
-      const doc = utools.db.get(screenshotDocId)
+      const metaId = screenshotDocId.replace('screenshot/', 'screenshot_aimeta/')
+      const doc = utools.db.get(metaId)
       if (!doc) return null
       return {
         docId: screenshotDocId,
-        app: doc.app || '',
-        time: doc.time || '',
-        timestamp: doc.timestamp || 0,
-        aiDescription: doc.aiDescription || ''
+        aiDescription: doc.aiDescription || '',
+        aiApp: doc.aiApp || ''
       }
     } catch (e) {
       console.error('getScreenshotMetaFromDb 失败:', e)
@@ -1677,32 +1675,32 @@ if (typeof utools !== 'undefined') {
     }
   }
 
-  // 开发环境：更新截图 AI 描述
-  window.updateScreenshotDescription = (screenshotDocId, description) => {
+  // 开发环境：更新截图 AI 描述和应用名（独立元数据文档）
+  window.updateScreenshotDescription = (screenshotDocId, description, aiApp) => {
     try {
       if (!screenshotDocId) return false
-      const doc = mockGet(screenshotDocId)
-      if (!doc) return false
-      doc.aiDescription = description || ''
-      return mockPut(doc)
+      const metaId = screenshotDocId.replace('screenshot/', 'screenshot_aimeta/')
+      const existing = mockGet(metaId) || { _id: metaId }
+      existing.aiDescription = description || ''
+      if (aiApp) existing.aiApp = aiApp
+      return mockPut(existing)
     } catch (e) {
       console.error('dev updateScreenshotDescription 失败:', e)
       return false
     }
   }
 
-  // 开发环境：获取截图元信息
+  // 开发环境：获取截图 AI 元信息
   window.getScreenshotMetaFromDb = (screenshotDocId) => {
     try {
       if (!screenshotDocId) return null
-      const doc = mockGet(screenshotDocId)
+      const metaId = screenshotDocId.replace('screenshot/', 'screenshot_aimeta/')
+      const doc = mockGet(metaId)
       if (!doc) return null
       return {
         docId: screenshotDocId,
-        app: doc.app || '',
-        time: doc.time || '',
-        timestamp: doc.timestamp || 0,
-        aiDescription: doc.aiDescription || ''
+        aiDescription: doc.aiDescription || '',
+        aiApp: doc.aiApp || ''
       }
     } catch (e) {
       console.error('dev getScreenshotMetaFromDb 失败:', e)

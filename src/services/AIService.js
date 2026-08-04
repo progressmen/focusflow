@@ -1340,27 +1340,55 @@ AIService.prototype.analyzeSingleScreenshotByProvider = async function (provider
 
   const clock = extractClockTime({ time, timestamp })
   const instructionText = [
-    '请用 1-2 句话简洁描述这张截图中用户正在做什么。',
-    `截图时间：${clock || '未知'}，应用：${app || '未知'}`,
-    '要求：',
-    '- 描述具体内容（如：浏览的网页主题、编辑的代码内容、聊天的对象等），不要只说应用名',
-    '- 只输出纯文本描述，不要输出 JSON、代码块或任何格式标记'
+    '请分析这张截图，按以下格式输出（不要输出其他内容）：',
+    `应用：<截图中正在使用的软件名称，如 Chrome、VSCode、微信、Figma 等。无法确定则输出"未知">`,
+    `描述：<1-2 句话描述用户正在做什么，包括具体内容主题>`,
+    '',
+    `截图时间：${clock || '未知'}`,
+    '注意：',
+    '- 通过截图中的窗口标题栏、菜单栏、图标等识别软件，不要依赖元数据中的应用名',
+    '- 描述具体内容（如：浏览的网页主题、编辑的代码内容、聊天的对象等），不要只说应用名'
   ].join('\n')
 
   const screenshot = { imageData, app, time, timestamp }
-  const sysPrompt = '你是一名截图描述助手，请简洁准确地描述截图内容，只输出纯文本。'
+  const sysPrompt = '你是一名截图分析助手，请准确识别软件名称并简洁描述用户活动，严格按指定格式输出。'
 
+  let text = ''
   if (provider.protocol === 'claude') {
-    return await callClaudeVision(provider, [screenshot], instructionText, sysPrompt)
-  }
-  if (provider.vision) {
+    text = await callClaudeVision(provider, [screenshot], instructionText, sysPrompt)
+  } else if (provider.vision) {
     const messages = buildVisionMessages([screenshot], instructionText)
     if (!messages) throw new Error('截图数据无效')
     messages.unshift({ role: 'system', content: sysPrompt })
-    return await callOpenAICompatChat(provider, messages, { max_tokens: 300 })
+    text = await callOpenAICompatChat(provider, messages, { max_tokens: 300 })
+  } else {
+    // 不支持图片的模型无法进行单图分析
+    return { app: '', description: '' }
   }
-  // 不支持图片的模型无法进行单图分析
-  return ''
+
+  // 解析「应用：xxx」和「描述：xxx」
+  const result = { app: '', description: '' }
+  const lines = String(text || '').split('\n')
+  for (const line of lines) {
+    const trimmed = line.trim()
+    const appMatch = trimmed.match(/^应用[：:]\s*(.+)$/)
+    if (appMatch) {
+      result.app = appMatch[1].trim()
+      continue
+    }
+    const descMatch = trimmed.match(/^描述[：:]\s*(.+)$/)
+    if (descMatch) {
+      result.description = descMatch[1].trim()
+    }
+  }
+  // 兜底：如果没解析到描述，用原始文本
+  if (!result.description) {
+    result.description = String(text || '').trim()
+  }
+  if (!result.app) {
+    result.app = '未知'
+  }
+  return result
 }
 
 /**

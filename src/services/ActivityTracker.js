@@ -247,31 +247,46 @@ export class ActivityTracker {
    */
   async analyzeSingleScreenshot(screenshotId, screenshotData) {
     if (!screenshotId || !screenshotData) return
-    // 防重入：上一次单图分析还没完成则跳过
-    if (this._singleShotBusy) {
-      console.log('[FocusFlow] 单图分析跳过：上一次还在进行')
-      return
-    }
+    // 队列模式：将待分析的截图加入队列，依次处理，不跳过任何一张
+    if (!this._singleShotQueue) this._singleShotQueue = []
+    this._singleShotQueue.push({ screenshotId, screenshotData })
+    if (this._singleShotBusy) return // 已有处理循环在跑，加入队列即可
     this._singleShotBusy = true
     try {
-      settingsService.loadProviders()
-      const provider = settingsService.loadActiveProvider()
-      if (!provider) return
-      // 不支持图片的模型无法进行单图分析
-      if (provider.protocol !== 'claude' && !provider.vision) return
+      while (this._singleShotQueue.length > 0) {
+        const item = this._singleShotQueue.shift()
+        try {
+          settingsService.loadProviders()
+          const provider = settingsService.loadActiveProvider()
+          if (!provider) {
+            console.warn('[FocusFlow] 单图分析跳过：未配置 AI provider')
+            continue
+          }
+          // 不支持图片的模型无法进行单图分析
+          if (provider.protocol !== 'claude' && !provider.vision) {
+            console.warn('[FocusFlow] 单图分析跳过：当前模型不支持图片（vision=false）')
+            continue
+          }
 
-      const description = await this.aiService.analyzeSingleScreenshotByProvider(provider, {
-        imageData: screenshotData.imageData,
-        app: screenshotData.app,
-        time: screenshotData.time,
-        timestamp: screenshotData.timestamp
-      })
-      if (description && typeof window.updateScreenshotDescription === 'function') {
-        window.updateScreenshotDescription(screenshotId, description)
-        console.log('[FocusFlow] 单图分析完成:', screenshotId, '描述:', description.slice(0, 60))
+          const result = await this.aiService.analyzeSingleScreenshotByProvider(provider, {
+            imageData: item.screenshotData.imageData,
+            app: item.screenshotData.app,
+            time: item.screenshotData.time,
+            timestamp: item.screenshotData.timestamp
+          })
+          // result 为 { app, description } 对象
+          if (result && typeof window.updateScreenshotDescription === 'function') {
+            const saved = window.updateScreenshotDescription(item.screenshotId, result.description, result.app)
+            if (saved) {
+              console.log('[FocusFlow] 单图分析完成:', item.screenshotId, '应用:', result.app, '描述:', (result.description || '').slice(0, 60))
+            } else {
+              console.warn('[FocusFlow] 单图分析完成但保存失败:', item.screenshotId, '应用:', result.app)
+            }
+          }
+        } catch (e) {
+          console.warn('[FocusFlow] 单图分析异常:', e && e.message)
+        }
       }
-    } catch (e) {
-      console.warn('[FocusFlow] 单图分析异常:', e && e.message)
     } finally {
       this._singleShotBusy = false
     }
@@ -370,9 +385,9 @@ export class ActivityTracker {
           const desc = (meta && meta.aiDescription) || ''
           if (desc) describedCount++
           analyses.push({
-            app: (meta && meta.app) || s.app || '',
-            time: (meta && meta.time) || s.time || '',
-            timestamp: (meta && meta.timestamp) || s.timestamp || 0,
+            app: (meta && meta.aiApp) || s.app || '',
+            time: s.time || '',
+            timestamp: s.timestamp || 0,
             description: desc
           })
         }
@@ -558,6 +573,27 @@ export class ActivityTracker {
         timestamp: s.timestamp,
         imageData: null
       }))
+      // 优先使用 AI 识别的应用名覆盖元数据中的应用名（后者在插件前台时恒为 uTools）
+      const isUtool = (name) => {
+        const n = String(name || '').toLowerCase().replace(/\s/g, '')
+        return n === 'utools' || n === 'utool'
+      }
+      if (typeof window.getScreenshotMetaFromDb === 'function') {
+        for (let i = 0; i < refs.length; i++) {
+          const meta = window.getScreenshotMetaFromDb(refs[i].docId)
+          if (meta && meta.aiApp) {
+            results[i].app = meta.aiApp
+          } else if (isUtool(results[i].app)) {
+            // 没有 AI 识别结果且原始 app 为 uTools -> 显示「未知」
+            results[i].app = '未知'
+          }
+        }
+      } else {
+        // 没有 getScreenshotMetaFromDb 时也过滤 uTools
+        for (let i = 0; i < refs.length; i++) {
+          if (isUtool(results[i].app)) results[i].app = '未知'
+        }
+      }
       // 有回调时逐张加载（渐进式更新 UI）；无回调时并发加载
       if (typeof onProgress === 'function') {
         for (let i = 0; i < refs.length; i++) {
