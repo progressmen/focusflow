@@ -256,6 +256,10 @@
               <strong>分类：</strong>{{ formatCategories(selectedItem.categories) }}
             </p>
           </div>
+          <div v-if="loadingScreenshots && slotScreenshots.length === 0" class="screenshot-loading">
+            <span class="spinner spinner-lg"></span>
+            <span>正在加载截图…</span>
+          </div>
           <div v-if="slotScreenshots.length > 0" class="screenshot-video-section">
             <h4>截图回放（{{ slotScreenshots.length }} 张）</h4>
             <div class="video-controls">
@@ -294,10 +298,10 @@
                     @load="onImgLoad"
                     @error="onImgError"
                   />
-                  <div v-if="imgError || !currentScreenshot.imageData" class="video-img video-img-placeholder">
+                  <div v-if="imgError || (!currentScreenshot.imageData && !imgLoading)" class="video-img video-img-placeholder">
                     <span>⚠ 截图加载失败或为空</span>
                   </div>
-                  <span class="zoom-hint" v-if="!imgError">🔍 点击放大</span>
+                  <span class="zoom-hint" v-if="!imgError && currentScreenshot.imageData">🔍 点击放大</span>
                 </div>
                 <button
                   class="nav-btn nav-next"
@@ -366,7 +370,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
 import { marked } from 'marked'
 import DOMPurify from 'dompurify'
 import { ActivityTracker, trackerInstance } from './services/ActivityTracker'
@@ -448,6 +452,7 @@ const playSpeed = ref(1500)
 const showZoom = ref(false)
 const imgLoading = ref(false)
 const imgError = ref(false)
+const loadingScreenshots = ref(false)
 
 // 清空数据相关 state 已移至 SettingsPanel
 
@@ -881,9 +886,27 @@ function onSettingsUpdated(payload) {
 async function openTimelineDetail(item) {
   selectedItem.value = item
   showDetail.value = true
-  slotScreenshots.value = await activityTracker.loadScreenshotsForSlot(item.id)
+  // 立即清空旧数据，显示加载态
+  slotScreenshots.value = []
   screenshotIndex.value = 0
+  loadingScreenshots.value = true
   resetImgState()
+
+  // 渐进式加载：每加载完一张即更新 UI，避免一次性阻塞
+  await activityTracker.loadScreenshotsForSlot(item.id, (results, loaded, total) => {
+    // 用新数组引用触发响应式更新
+    slotScreenshots.value = results.slice()
+    // 第一张加载完成后即可显示，并初始化图片状态
+    if (loaded === 1) {
+      resetImgState()
+    }
+  })
+  loadingScreenshots.value = false
+  // 不再调用 resetImgState()：图片已通过 @load 设置 imgLoading=false，
+  // 此处再调会因 src 未变而 @load 不触发，导致 imgLoading 卡在 true
+  if (slotScreenshots.value.length === 0) {
+    imgLoading.value = false
+  }
 }
 
 function closeDetail() {
@@ -892,6 +915,7 @@ function closeDetail() {
   showDetail.value = false
   selectedItem.value = null
   slotScreenshots.value = []
+  loadingScreenshots.value = false
 }
 
 const currentScreenshot = computed(() => {
@@ -900,8 +924,22 @@ const currentScreenshot = computed(() => {
 })
 
 function resetImgState() {
-  imgLoading.value = !!currentScreenshot.value && !!currentScreenshot.value.imageData
+  const sc = currentScreenshot.value
   imgError.value = false
+  if (!sc || !sc.imageData) {
+    // 图片数据为空：仅在仍在加载截图时显示加载态
+    imgLoading.value = !!(sc && loadingScreenshots.value)
+    return
+  }
+  // 图片数据就绪：设为加载中，再用 nextTick 检查 img 是否已缓存渲染完成
+  // （src 未变时浏览器不会触发 @load，需要手动检测）
+  imgLoading.value = true
+  nextTick(() => {
+    const el = document.querySelector('.shot-canvas .video-img')
+    if (el && el.complete && el.naturalWidth > 0) {
+      imgLoading.value = false
+    }
+  })
 }
 
 function onImgLoad() {
@@ -1920,6 +1958,27 @@ async function reanalyzeSlot(item) {
 .ai-summary p { margin: 6px 0; font-size: 14px; line-height: 1.6; color: #34495e; }
 
 .screenshot-video-section { margin-top: 24px; padding-top: 16px; border-top: 1px solid #e1e5e9; }
+
+/* 截图加载态 */
+.screenshot-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  margin-top: 24px;
+  padding: 48px 16px;
+  border-top: 1px solid #e1e5e9;
+  color: #7f8c8d;
+  font-size: 14px;
+}
+.spinner-lg {
+  width: 20px;
+  height: 20px;
+  border: 3px solid #e1e5e9;
+  border-top-color: #3498db;
+  border-radius: 50%;
+  animation: ff-spin 0.7s linear infinite;
+}
 .screenshot-video-section h4 { margin: 0 0 12px 0; color: #2c3e50; font-size: 14px; }
 .video-controls {
   display: flex;

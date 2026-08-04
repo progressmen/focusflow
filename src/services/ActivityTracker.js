@@ -27,6 +27,8 @@ export class ActivityTracker {
     this._stateListeners = new Set()
     // 「上一时段巡检」定时器（每分钟检查一次，独立于截图节奏）
     this._slotSweepTimer = null
+    // 单图分析防重入标记
+    this._singleShotBusy = false
   }
 
   /**
@@ -223,6 +225,11 @@ export class ActivityTracker {
       if (typeof window.saveScreenshotToDb === 'function') {
         const id = await window.saveScreenshotToDb(screenshotData)
         if (id) console.log('[FocusFlow] 截图已保存:', id)
+
+        // 异步触发单图 AI 分析：将图片描述存入截图文档，供后续时段总结使用
+        this.analyzeSingleScreenshot(id, screenshotData).catch((e) =>
+          console.warn('[FocusFlow] 单图分析失败：', e && e.message)
+        )
       }
 
       // 尝试分析「上一个已完成的时间槽」（当前槽还在累积，不分析）
@@ -231,6 +238,42 @@ export class ActivityTracker {
       )
     } catch (e) {
       console.error('[FocusFlow] 截图失败:', e)
+    }
+  }
+
+  /**
+   * 单张截图 AI 分析：将图片描述存入截图文档
+   * 在截图保存后异步触发，不阻塞截图定时器
+   */
+  async analyzeSingleScreenshot(screenshotId, screenshotData) {
+    if (!screenshotId || !screenshotData) return
+    // 防重入：上一次单图分析还没完成则跳过
+    if (this._singleShotBusy) {
+      console.log('[FocusFlow] 单图分析跳过：上一次还在进行')
+      return
+    }
+    this._singleShotBusy = true
+    try {
+      settingsService.loadProviders()
+      const provider = settingsService.loadActiveProvider()
+      if (!provider) return
+      // 不支持图片的模型无法进行单图分析
+      if (provider.protocol !== 'claude' && !provider.vision) return
+
+      const description = await this.aiService.analyzeSingleScreenshotByProvider(provider, {
+        imageData: screenshotData.imageData,
+        app: screenshotData.app,
+        time: screenshotData.time,
+        timestamp: screenshotData.timestamp
+      })
+      if (description && typeof window.updateScreenshotDescription === 'function') {
+        window.updateScreenshotDescription(screenshotId, description)
+        console.log('[FocusFlow] 单图分析完成:', screenshotId, '描述:', description.slice(0, 60))
+      }
+    } catch (e) {
+      console.warn('[FocusFlow] 单图分析异常:', e && e.message)
+    } finally {
+      this._singleShotBusy = false
     }
   }
 
@@ -312,56 +355,90 @@ export class ActivityTracker {
         throw new Error('当前时间槽没有截图')
       }
 
-      // 加载截图原图（任何一张失败都继续，但全部失败则报错）
-      console.log('[FocusFlow] analyzeSlot：开始加载', slot.screenshots.length, '张截图')
-      const screenshots = []
-      const failedDocs = []
-      for (const s of slot.screenshots) {
-        try {
-          const img = window.getScreenshotFromDb ? await window.getScreenshotFromDb(s.docId) : null
-          if (img) {
-            screenshots.push({ imageData: img, app: s.app, time: s.time, timestamp: s.timestamp })
-          } else {
-            failedDocs.push(s.docId)
-          }
-        } catch (e) {
-          failedDocs.push(s.docId)
-          console.warn('[FocusFlow] 加载截图失败:', s.docId, e)
-        }
-      }
-      if (screenshots.length === 0) {
-        throw new Error(
-          `所有截图加载失败（共 ${slot.screenshots.length} 张），可能是附件丢失。请尝试清空当日数据后重新追踪。`
-        )
-      }
-      if (failedDocs.length > 0) {
-        console.warn('[FocusFlow] 部分截图加载失败：', failedDocs)
-      }
-
       const timeLabel = formatTimeslot(roundedSec)
       const categories = Array.isArray(settings.categories) ? settings.categories : []
       if (categories.length === 0) {
         console.warn('[FocusFlow] 未配置任何分类，AI 可能无法准确归类')
       }
-      console.log('[FocusFlow] analyzeSlot：调用 AI', {
-        provider: provider.id,
-        model: provider.model,
-        roundedSec,
-        images: screenshots.length,
-        categories: categories.map((c) => c.name),
-        timeLabel
-      })
+
+      // 优先：加载截图的 AI 文字描述，用文本总结（不传图片，降低上下文压力）
+      const analyses = []
+      let describedCount = 0
+      if (typeof window.getScreenshotMetaFromDb === 'function') {
+        for (const s of slot.screenshots) {
+          const meta = window.getScreenshotMetaFromDb(s.docId)
+          const desc = (meta && meta.aiDescription) || ''
+          if (desc) describedCount++
+          analyses.push({
+            app: (meta && meta.app) || s.app || '',
+            time: (meta && meta.time) || s.time || '',
+            timestamp: (meta && meta.timestamp) || s.timestamp || 0,
+            description: desc
+          })
+        }
+      }
 
       let result
       try {
-        result = await this.aiService.analyzeTimeslotByProvider(provider, {
-          categories,
-          defaultCategory: settings.defaultCategory || '',
-          screenshots,
-          timeLabel
-        })
+        if (describedCount > 0) {
+          // 文本总结模式
+          console.log('[FocusFlow] analyzeSlot：文本总结模式', {
+            provider: provider.id,
+            model: provider.model,
+            roundedSec,
+            analyses: analyses.length,
+            described: describedCount,
+            categories: categories.map((c) => c.name),
+            timeLabel
+          })
+          result = await this.aiService.summarizeSlotByTextByProvider(provider, {
+            categories,
+            defaultCategory: settings.defaultCategory || '',
+            analyses,
+            timeLabel
+          })
+        } else {
+          // 回退：无文字描述，加载图片用视觉模式分析
+          console.log('[FocusFlow] analyzeSlot：图片模式（无文字描述，回退）', {
+            provider: provider.id,
+            model: provider.model,
+            roundedSec,
+            images: slot.screenshots.length,
+            categories: categories.map((c) => c.name),
+            timeLabel
+          })
+          const screenshots = []
+          const failedDocs = []
+          for (const s of slot.screenshots) {
+            try {
+              const img = window.getScreenshotFromDb ? await window.getScreenshotFromDb(s.docId) : null
+              if (img) {
+                screenshots.push({ imageData: img, app: s.app, time: s.time, timestamp: s.timestamp })
+              } else {
+                failedDocs.push(s.docId)
+              }
+            } catch (e) {
+              failedDocs.push(s.docId)
+              console.warn('[FocusFlow] 加载截图失败:', s.docId, e)
+            }
+          }
+          if (screenshots.length === 0) {
+            throw new Error(
+              `所有截图加载失败（共 ${slot.screenshots.length} 张），可能是附件丢失。请尝试清空当日数据后重新追踪。`
+            )
+          }
+          if (failedDocs.length > 0) {
+            console.warn('[FocusFlow] 部分截图加载失败：', failedDocs)
+          }
+          result = await this.aiService.analyzeTimeslotByProvider(provider, {
+            categories,
+            defaultCategory: settings.defaultCategory || '',
+            screenshots,
+            timeLabel
+          })
+        }
       } catch (e) {
-        console.error('[FocusFlow] analyzeTimeslotByProvider 抛出异常:', e)
+        console.error('[FocusFlow] AI 分析抛出异常:', e)
         throw new Error(`AI 调用失败：${(e && e.message) || e}`)
       }
 
@@ -467,23 +544,39 @@ export class ActivityTracker {
 
   /**
    * 批量读取某个日期所有截图的 imageData（用于播放器）
+   * 支持渐进式加载：传入 onProgress 回调后，每加载完一张即回调更新
    */
-  async loadScreenshotsForSlot(roundedSeconds) {
+  async loadScreenshotsForSlot(roundedSeconds, onProgress) {
     try {
       const slot = window.getTimelineSlot ? window.getTimelineSlot(roundedSeconds) : null
       if (!slot || !slot.screenshots || slot.screenshots.length === 0) return []
-      const results = await Promise.all(
-        slot.screenshots.map(async (s) => {
-          const img = window.getScreenshotFromDb ? await window.getScreenshotFromDb(s.docId) : null
-          return {
-            docId: s.docId,
-            app: s.app,
-            time: s.time,
-            timestamp: s.timestamp,
-            imageData: img
+      const refs = slot.screenshots
+      const results = refs.map((s) => ({
+        docId: s.docId,
+        app: s.app,
+        time: s.time,
+        timestamp: s.timestamp,
+        imageData: null
+      }))
+      // 有回调时逐张加载（渐进式更新 UI）；无回调时并发加载
+      if (typeof onProgress === 'function') {
+        for (let i = 0; i < refs.length; i++) {
+          try {
+            const img = window.getScreenshotFromDb ? await window.getScreenshotFromDb(refs[i].docId) : null
+            results[i].imageData = img
+          } catch (e) {
+            console.warn('[FocusFlow] 加载截图失败:', refs[i].docId, e)
           }
-        })
-      )
+          onProgress(results, i + 1, refs.length)
+        }
+      } else {
+        await Promise.all(
+          refs.map(async (s, i) => {
+            const img = window.getScreenshotFromDb ? await window.getScreenshotFromDb(s.docId) : null
+            results[i].imageData = img
+          })
+        )
+      }
       return results
     } catch (e) {
       console.error('[FocusFlow] loadScreenshotsForSlot 失败:', e)

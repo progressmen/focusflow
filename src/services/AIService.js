@@ -1216,6 +1216,7 @@ async function callClaudeText(provider, prompt, opts = {}) {
     model: provider.model,
     max_tokens: opts.maxTokens || 1500,
     temperature: opts.temperature ?? 0.5,
+    ...(opts.system ? { system: opts.system } : {}),
     messages: [{ role: 'user', content: [{ type: 'text', text: prompt }] }]
   })
   return (response?.content || []).map((c) => (c?.text || '')).join('').trim()
@@ -1317,6 +1318,131 @@ AIService.prototype.analyzeTimeslotByProvider = async function (provider, args) 
     console.warn('[FocusFlow][AI] JSON 解析失败，model=', provider.model, ' provider=', provider.id)
   } else {
     console.log('[FocusFlow][AI] 解析成功:', {
+      title: parsed.title,
+      categories: parsed.categories,
+      summaryLen: parsed.summary.length,
+      detailLen: parsed.detail.length
+    })
+  }
+  parsed.model = provider.model
+  return parsed
+}
+
+/**
+ * 单张截图分析：发送一张图片给 AI，返回简洁的文字描述
+ * 用于在截图拍摄后即时分析，降低后续时段总结的上下文压力
+ */
+AIService.prototype.analyzeSingleScreenshotByProvider = async function (provider, args) {
+  const { imageData = '', app = '', time = '', timestamp = 0 } = args || {}
+  if (!provider) throw new Error('未指定 AI provider')
+  if (!provider.model) throw new Error('未指定模型 id')
+  if (!imageData) throw new Error('没有可分析的截图')
+
+  const clock = extractClockTime({ time, timestamp })
+  const instructionText = [
+    '请用 1-2 句话简洁描述这张截图中用户正在做什么。',
+    `截图时间：${clock || '未知'}，应用：${app || '未知'}`,
+    '要求：',
+    '- 描述具体内容（如：浏览的网页主题、编辑的代码内容、聊天的对象等），不要只说应用名',
+    '- 只输出纯文本描述，不要输出 JSON、代码块或任何格式标记'
+  ].join('\n')
+
+  const screenshot = { imageData, app, time, timestamp }
+  const sysPrompt = '你是一名截图描述助手，请简洁准确地描述截图内容，只输出纯文本。'
+
+  if (provider.protocol === 'claude') {
+    return await callClaudeVision(provider, [screenshot], instructionText, sysPrompt)
+  }
+  if (provider.vision) {
+    const messages = buildVisionMessages([screenshot], instructionText)
+    if (!messages) throw new Error('截图数据无效')
+    messages.unshift({ role: 'system', content: sysPrompt })
+    return await callOpenAICompatChat(provider, messages, { max_tokens: 300 })
+  }
+  // 不支持图片的模型无法进行单图分析
+  return ''
+}
+
+/**
+ * 基于文字描述的时段总结：将逐张截图的文字分析汇总，让 AI 输出标题/摘要/分类
+ * 替代原来一次性发送所有图片的方式，大幅降低上下文长度
+ */
+AIService.prototype.summarizeSlotByTextByProvider = async function (provider, args) {
+  const { categories = [], defaultCategory = '', analyses = [], timeLabel = '' } = args || {}
+  if (!provider) throw new Error('未指定 AI provider')
+  if (!provider.model) throw new Error('未指定模型 id')
+  if (!analyses.length) throw new Error('没有可分析的截图描述')
+
+  const catLines = (categories || []).map((c) => `- ${c.name}：${c.description || ''}`).join('\n')
+  const appList = Array.from(new Set(analyses.map((a) => a.app).filter(Boolean))).join('、')
+
+  // 构建活动记录文本（按时间顺序）
+  const timelineText = analyses.map((a, i) => {
+    const clock = extractClockTime({ time: a.time, timestamp: a.timestamp })
+    return `  ${i + 1}. ${clock || '未知'} [${a.app || '未知'}] ${a.description || '（无描述）'}`
+  }).join('\n')
+
+  const instructionText = [
+    `你是一名个人活动分析师。请基于下列逐张截图的活动描述，判断用户在时段「${timeLabel}」内做了什么，并将其归类到给定的分类中。`,
+    '',
+    `本时段涉及的应用：${appList || '未知'}`,
+    `\n本时段活动记录（共 ${analyses.length} 条，按时间顺序排列）：\n${timelineText}`,
+    '',
+    '可用分类（请只能从中选择，可以选 1~3 个最贴切的分类，不要全部勾选）：',
+    catLines || '（未配置分类，请使用 "未分类"）',
+    '',
+    '【分类原则 - 重要】',
+    '1. 必须严格依据「活动描述中的实际内容」判断，不要只看应用名称：',
+    '   - 同一个浏览器既可能是「工作」也可能是「个人」/「非专注」，要看具体内容；',
+    '   - 同一个 IM 工具既可能是工作沟通也可能是私聊娱乐；',
+    '   - 文档/邮件不一定都是工作，要看内容主题。',
+    '2. 当证据不足时，请优先选择「未分类」（如果分类列表里没有"未分类"则保持空数组 []），不要硬性归到任意一类。',
+    '3. 不要把所有不确定情况都归为同一类；只在你能找到明确支持依据时才打上对应分类。',
+    defaultCategory
+      ? `4. 用户配置的兜底分类是「${defaultCategory}」，但仅当 1~3 条都判定不出时才能使用，不要轻易回退。`
+      : '',
+    '',
+    '【输出格式 - 严格遵守】',
+    '- 只输出一个合法 JSON 对象，不要输出任何其他文字',
+    '- 不要使用 ```json 或 ``` 包裹',
+    '- 不要在 JSON 前后加解释、备注、问候、签名',
+    '- 字段必须完整，缺失字段请填空字符串或空数组',
+    '',
+    '{',
+    '  "title": "10 个字以内的本时段标题",',
+    '  "summary": "30~80 字的本时段活动摘要",',
+    '  "detail": "150~250 字的详细描述。请按活动记录的时间轴顺序还原过程，体现出每个时间点对应的具体内容与场景切换。在描述中请简短点出每个时间点选用的分类依据",',
+    '  "categories": ["分类名1"]',
+    '}'
+  ].filter(Boolean).join('\n')
+
+  const systemPrompt =
+    '你是一个严格的活动分析助手，必须只用 JSON 回应。' +
+    '禁止用 ``` 包裹、禁止在 JSON 前后添加任何说明文字。' +
+    '若你内部需要思考，请只在心里进行，最终回答必须是单个合法 JSON 对象。'
+
+  // 纯文本调用（不需要 vision 支持）
+  let text = ''
+  if (provider.protocol === 'claude') {
+    text = await callClaudeText(provider, instructionText, { maxTokens: 1000, temperature: 0.4, system: systemPrompt })
+  } else {
+    text = await callOpenAICompatChat(
+      provider,
+      [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: instructionText }
+      ],
+      { responseFormat: 'json_object', max_tokens: 1000 }
+    )
+  }
+
+  if (!text) throw new Error('AI 返回了空内容')
+  console.log('[FocusFlow][AI] 文本总结原始输出（前 300 字符）:\n' + String(text).slice(0, 300))
+  const parsed = parseAnalysisJson(text)
+  if (parsed._parseFailed) {
+    console.warn('[FocusFlow][AI] JSON 解析失败，model=', provider.model, ' provider=', provider.id)
+  } else {
+    console.log('[FocusFlow][AI] 文本总结解析成功:', {
       title: parsed.title,
       categories: parsed.categories,
       summaryLen: parsed.summary.length,

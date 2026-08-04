@@ -764,6 +764,43 @@ if (typeof utools !== 'undefined') {
     }
   }
 
+  // 更新截图文档的 AI 描述（单图分析结果）
+  window.updateScreenshotDescription = (screenshotDocId, description) => {
+    try {
+      if (!screenshotDocId) return false
+      const doc = utools.db.get(screenshotDocId)
+      if (!doc) {
+        console.warn('updateScreenshotDescription: 文档不存在', screenshotDocId)
+        return false
+      }
+      doc.aiDescription = description || ''
+      const res = utools.db.put(doc)
+      return !!(res && res.ok)
+    } catch (e) {
+      console.error('updateScreenshotDescription 失败:', e)
+      return false
+    }
+  }
+
+  // 获取截图文档的元信息（不含图片附件，用于文本总结）
+  window.getScreenshotMetaFromDb = (screenshotDocId) => {
+    try {
+      if (!screenshotDocId) return null
+      const doc = utools.db.get(screenshotDocId)
+      if (!doc) return null
+      return {
+        docId: screenshotDocId,
+        app: doc.app || '',
+        time: doc.time || '',
+        timestamp: doc.timestamp || 0,
+        aiDescription: doc.aiDescription || ''
+      }
+    } catch (e) {
+      console.error('getScreenshotMetaFromDb 失败:', e)
+      return null
+    }
+  }
+
   // 获取 timeslot 文档
   window.getTimelineSlot = (roundedSeconds) => {
     try {
@@ -1636,6 +1673,39 @@ if (typeof utools !== 'undefined') {
       return mockGetAttachment(screenshotDocId)
     } catch (e) {
       console.error('dev getScreenshotFromDb 失败:', e)
+      return null
+    }
+  }
+
+  // 开发环境：更新截图 AI 描述
+  window.updateScreenshotDescription = (screenshotDocId, description) => {
+    try {
+      if (!screenshotDocId) return false
+      const doc = mockGet(screenshotDocId)
+      if (!doc) return false
+      doc.aiDescription = description || ''
+      return mockPut(doc)
+    } catch (e) {
+      console.error('dev updateScreenshotDescription 失败:', e)
+      return false
+    }
+  }
+
+  // 开发环境：获取截图元信息
+  window.getScreenshotMetaFromDb = (screenshotDocId) => {
+    try {
+      if (!screenshotDocId) return null
+      const doc = mockGet(screenshotDocId)
+      if (!doc) return null
+      return {
+        docId: screenshotDocId,
+        app: doc.app || '',
+        time: doc.time || '',
+        timestamp: doc.timestamp || 0,
+        aiDescription: doc.aiDescription || ''
+      }
+    } catch (e) {
+      console.error('dev getScreenshotMetaFromDb 失败:', e)
       return null
     }
   }
